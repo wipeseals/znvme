@@ -75,12 +75,6 @@ pub fn main() !void {
     );
     defer std.posix.munmap(bar0_mmap);
 
-    // Controller Enable
-    const bar0_ptr: *volatile NvmeRegisters = @ptrCast(bar0_mmap);
-    std.debug.print("CC before: {}\n", .{bar0_ptr.cc});
-    // Enable the controller
-    bar0_ptr.cc.EN = true;
-    std.debug.print("CC after: {}\n", .{bar0_ptr.cc});
     // test: print BAR0 data
     const bar0_data: []u8 = @ptrCast(bar0_mmap);
     for (0..256) |i| {
