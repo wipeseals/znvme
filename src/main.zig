@@ -81,7 +81,7 @@ pub fn main() !void {
         if (i % 16 == 0) {
             std.debug.print("\n{x:08}: ", .{i});
         }
-        std.debug.print("{x:2} ", .{bar0_data[i]});
+        std.debug.print("{x:02} ", .{bar0_data[i]});
     }
     std.debug.print("\n", .{});
 }
