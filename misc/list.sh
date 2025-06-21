@@ -18,5 +18,5 @@ lspci | grep "Non-Volatile memory controller" | while read -r line; do
     # Print PCI address, VID, PID, and manufacturer/model info
     echo "# PCI Address: $pci_address, VID: $vid, PID: $pid"
 
-    lspci -v -s "$pci_address"
+    lspci -s "$pci_address" -vvv
 done
