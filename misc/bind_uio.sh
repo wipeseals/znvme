@@ -13,7 +13,7 @@ PCI_ADDR="$1"
 VID="$2"
 PID="$3"
 UNBIND_PATH="/sys/bus/pci/drivers/nvme/unbind"
-BIND_PATH="/sys/bus/pci/drivers/vfio-pci/bind"
+BIND_PATH="/sys/bus/pci/drivers/uio_pci_generic/bind"
 
 # unbind the NVMe device from the nvme driver
 if [ ! -e "/sys/bus/pci/drivers/nvme/$PCI_ADDR" ]; then
@@ -23,29 +23,25 @@ else
   echo "Unbound $PCI_ADDR from nvme driver."
 fi
 
-# enable the vfio-pci driver
-sudo modprobe vfio-pci
+# enable the uio_pci_generic driver
+sudo modprobe uio_pci_generic
 
-# vfio-pci/new_id is used to bind the device to vfio-pci (error if it already exists)
-echo "Creating new_id for vfio-pci driver."
-echo "$VID $PID" | sudo tee "/sys/bus/pci/drivers/vfio-pci/new_id" 2>/dev/null || true
-
-# bind the vfio-pci driver to the device
-if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
+# bind the uio_pci_generic driver to the device
+if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
   echo "$PCI_ADDR" | sudo tee "$BIND_PATH"
-  echo "Bound $PCI_ADDR to vfio-pci driver."
+  echo "Bound $PCI_ADDR to uio_pci_generic driver."
 else
-  echo "Device $PCI_ADDR is already bound to vfio-pci driver."
+  echo "Device $PCI_ADDR is already bound to uio_pci_generic driver."
 fi
 
-# Check if the device is now bound to vfio-pci
-if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
-  echo "Failed to bind $PCI_ADDR to vfio-pci driver."
+# Check if the device is now bound to uio_pci_generic
+if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
+  echo "Failed to bind $PCI_ADDR to uio_pci_generic driver."
   exit 1
 fi
 
 # allow read write access to the bar0 (for testing)
 chmod 666 "/sys/bus/pci/devices/$PCI_ADDR/resource0"
 
-echo "Successfully bound $PCI_ADDR to vfio-pci driver."
+echo "Successfully bound $PCI_ADDR to uio_pci_generic driver."
 lspci -k -s "$PCI_ADDR"

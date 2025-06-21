@@ -8,15 +8,15 @@ if [ $# -lt 1 ]; then
 fi
 
 PCI_ADDR="$1"
-UNBIND_PATH="/sys/bus/pci/drivers/vfio-pci/unbind"
+UNBIND_PATH="/sys/bus/pci/drivers/uio_pci_generic/unbind"
 BIND_PATH="/sys/bus/pci/drivers/nvme/bind"
 
-# unbind vfio-pci driver
-if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
-  echo "Device $PCI_ADDR is already unbound from the vfio-pci driver."
+# unbind uio_pci_generic driver
+if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
+  echo "Device $PCI_ADDR is already unbound from the uio_pci_generic driver."
 else
   echo "$PCI_ADDR" | sudo tee "$UNBIND_PATH"
-  echo "Unbound $PCI_ADDR from vfio-pci driver."
+  echo "Unbound $PCI_ADDR from uio_pci_generic driver."
 fi
 
 # bind the nvme driver to the device
