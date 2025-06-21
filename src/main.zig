@@ -1,46 +1,35 @@
-//! By convention, main.zig is where your main function lives in the case that
-//! you are building an executable. If you are making a library, the convention
-//! is to delete this file and start with root.zig instead.
-
-pub fn main() !void {
-    // Prints to stderr (it's a shortcut based on `std.io.getStdErr()`)
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-
-    // stdout is for the actual output of your application, for example if you
-    // are implementing gzip, then only the compressed bytes should be sent to
-    // stdout, not any debugging messages.
-    const stdout_file = std.io.getStdOut().writer();
-    var bw = std.io.bufferedWriter(stdout_file);
-    const stdout = bw.writer();
-
-    try stdout.print("Run `zig build test` to run the tests.\n", .{});
-
-    try bw.flush(); // Don't forget to flush!
-}
-
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
-
-test "use other module" {
-    try std.testing.expectEqual(@as(i32, 150), lib.add(100, 50));
-}
-
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
-}
-
+// src/main.zig
 const std = @import("std");
 
-/// This imports the separate module containing `root.zig`. Take a look in `build.zig` for details.
-const lib = @import("toynvme_lib");
+// Cのヘッダファイルをインポートして、定数や構造体、関数を使えるようにする
+const c = @cImport({
+    @cInclude("fcntl.h");
+    @cInclude("unistd.h");
+    @cInclude("sys/ioctl.h");
+    @cInclude("sys/mman.h");
+    @cInclude("linux/vfio.h");
+    @cInclude("stdlib.h"); // realpath, free
+});
+
+pub fn main() !void {
+    const allocator = std.heap.c_allocator;
+
+    // コマンドライン引数を取得
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    if (args.len != 2) {
+        std.debug.print("Usage: toynvme [pci_address]\n", .{});
+        std.debug.print(" - [pci_address] 0000:01:00.0\n", .{});
+        return;
+    }
+    const pci_addr = args[1];
+    std.debug.print("PCI Address: {s}\n", .{pci_addr});
+
+    // 1. VFIOコンテナを作成
+    const container_fd = c.open("/dev/vfio/vfio", @as(c_int, c.O_RDWR), @as(c_uint, 0));
+    if (container_fd < 0) {
+        @panic("Failed to open /dev/vfio/vfio");
+    }
+    defer _ = c.close(container_fd);
+}
