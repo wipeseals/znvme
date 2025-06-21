@@ -15,7 +15,7 @@ BIND_PATH="/sys/bus/pci/drivers/nvme/bind"
 if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
   echo "Device $PCI_ADDR is already unbound from the uio_pci_generic driver."
 else
-  echo "$PCI_ADDR" > "$UNBIND_PATH"
+  echo "$PCI_ADDR" | sudo tee "$UNBIND_PATH"
   echo "Unbound $PCI_ADDR from uio_pci_generic driver."
 fi
 
@@ -23,7 +23,7 @@ fi
 if [ -e "/sys/bus/pci/drivers/nvme/$PCI_ADDR" ]; then
   echo "Device $PCI_ADDR is already bound to nvme driver."
 else
-  echo "$PCI_ADDR" > "$BIND_PATH"
+  echo "$PCI_ADDR" | sudo tee "$BIND_PATH"
   echo "Bound $PCI_ADDR to nvme driver."
 fi
 
