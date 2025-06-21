@@ -1,22 +1,22 @@
 #!/bin/bash -eu
 set -o pipefail
 
-if [ $# -ne 1 ]; then
+if [ $# -lt 1 ]; then
   echo "Usage: $0 <PCI_ADDRESS>"
   echo " - <PCI_ADDRESS> is the PCI address of the NVMe device to unbind (e.g., 0000:00:1f.2)"
   exit 1
 fi
 
 PCI_ADDR="$1"
-UNBIND_PATH="/sys/bus/pci/drivers/uio_pci_generic/unbind"
+UNBIND_PATH="/sys/bus/pci/drivers/vfio-pci/unbind"
 BIND_PATH="/sys/bus/pci/drivers/nvme/bind"
 
-# unbind uio_pci_generic driver
-if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
-  echo "Device $PCI_ADDR is already unbound from the uio_pci_generic driver."
+# unbind vfio-pci driver
+if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
+  echo "Device $PCI_ADDR is already unbound from the vfio-pci driver."
 else
   echo "$PCI_ADDR" | sudo tee "$UNBIND_PATH"
-  echo "Unbound $PCI_ADDR from uio_pci_generic driver."
+  echo "Unbound $PCI_ADDR from vfio-pci driver."
 fi
 
 # bind the nvme driver to the device

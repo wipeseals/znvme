@@ -1,7 +1,7 @@
 #!/bin/bash -eu
 set -o pipefail
 
-if [ $# -ne 3 ]; then
+if [ $# -lt 3 ]; then
   echo "Usage: $0 <PCI_ADDRESS> <VID> <PID>"
   echo " - <PCI_ADDRESS> is the PCI address of the NVMe device to unbind (e.g., 0000:00:1f.2)"
   echo " - <VID> is the vendor ID of the NVMe device (e.g., 8086)"
@@ -13,7 +13,7 @@ PCI_ADDR="$1"
 VID="$2"
 PID="$3"
 UNBIND_PATH="/sys/bus/pci/drivers/nvme/unbind"
-BIND_PATH="/sys/bus/pci/drivers/uio_pci_generic/bind"
+BIND_PATH="/sys/bus/pci/drivers/vfio-pci/bind"
 
 # unbind the NVMe device from the nvme driver
 if [ ! -e "/sys/bus/pci/drivers/nvme/$PCI_ADDR" ]; then
@@ -23,30 +23,26 @@ else
   echo "Unbound $PCI_ADDR from nvme driver."
 fi
 
-# enable the uio_pci_generic driver
-sudo modprobe uio_pci_generic
+# enable the vfio-pci driver
+sudo modprobe vfio-pci
 
-# add uio_pci_generic/new_id
-if grep -q "$VID $PID" "/sys/bus/pci/drivers/uio_pci_generic/new_id"; then
-  echo "Device with VID:PID $VID:$PID is already registered in uio_pci_generic."
-else
-  echo "$VID $PID" | sudo tee "/sys/bus/pci/drivers/uio_pci_generic/new_id"
-  echo "Bound $PCI_ADDR to uio_pci_generic driver."
-fi
+# vfio-pci/new_id is used to bind the device to vfio-pci (error if it already exists)
+echo "Creating new_id for vfio-pci driver."
+echo "$VID $PID" | sudo tee "/sys/bus/pci/drivers/vfio-pci/new_id" 2>/dev/null || true
 
-# bind the uio_pci_generic driver to the device
-if [ -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
-  echo "Device $PCI_ADDR is already bound to uio_pci_generic driver."
-else
+# bind the vfio-pci driver to the device
+if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
   echo "$PCI_ADDR" | sudo tee "$BIND_PATH"
-  echo "Bound $PCI_ADDR to uio_pci_generic driver."
+  echo "Bound $PCI_ADDR to vfio-pci driver."
+else
+  echo "Device $PCI_ADDR is already bound to vfio-pci driver."
 fi
 
-# Check if the device is now bound to uio_pci_generic
-if [ -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
-  echo "Successfully bound $PCI_ADDR to uio_pci_generic driver."
-else
-  echo "Failed to bind $PCI_ADDR to uio_pci_generic driver."
+# Check if the device is now bound to vfio-pci
+if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
+  echo "Failed to bind $PCI_ADDR to vfio-pci driver."
   exit 1
 fi
+
+echo "Successfully bound $PCI_ADDR to vfio-pci driver."
 lspci -k -s "$PCI_ADDR"

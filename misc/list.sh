@@ -15,9 +15,8 @@ lspci | grep "Non-Volatile memory controller" | while read -r line; do
     vid=${vid_pid%%:*}
     pid=${vid_pid##*:}
 
-    # Extract vendor and device name (manufacturer/model) from the original line
-    info=$(echo "$line" | sed -E 's/^[^ ]+ [^:]+: //')
-
     # Print PCI address, VID, PID, and manufacturer/model info
-    echo "PCI Address: $pci_address, VID: $vid, PID: $pid, Info: $info"
+    echo "# PCI Address: $pci_address, VID: $vid, PID: $pid"
+
+    lspci -v -s "$pci_address"
 done
