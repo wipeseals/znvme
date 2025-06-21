@@ -13,6 +13,7 @@
         devShell.x86_64-linux = pkgs.mkShellNoCC {
             packages = with pkgs; [
                 zig
+                nvme-cli
             ];
         };
     };
