@@ -1,6 +1,11 @@
 #!/bin/bash -eu
 set -o pipefail
 
+echo "# Listing NVMe devices"
+nvme list
+
+echo ""
+echo "# Listing NVMe devices with PCI addresses, VID, PID, and manufacturer/model info"
 lspci | grep "Non-Volatile memory controller" | while read -r line; do
     # Extract the PCI address from the line
     pci_address=$(echo "$line" | awk '{print $1}')

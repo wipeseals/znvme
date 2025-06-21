@@ -1,7 +1,6 @@
 #!/bin/bash -eu
 set -o pipefail
 
-# PCIアドレスが指定されているか確認
 if [ $# -ne 3 ]; then
   echo "Usage: $0 <PCI_ADDRESS> <VID> <PID>"
   echo " - <PCI_ADDRESS> is the PCI address of the NVMe device to unbind (e.g., 0000:00:1f.2)"
