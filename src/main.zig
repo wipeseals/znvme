@@ -1,16 +1,6 @@
 // src/main.zig
 const std = @import("std");
 
-// Cのヘッダファイルをインポートして、定数や構造体、関数を使えるようにする
-const c = @cImport({
-    @cInclude("fcntl.h");
-    @cInclude("unistd.h");
-    @cInclude("sys/ioctl.h");
-    @cInclude("sys/mman.h");
-    @cInclude("linux/vfio.h");
-    @cInclude("stdlib.h"); // realpath, free
-});
-
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
 
@@ -26,10 +16,10 @@ pub fn main() !void {
     const pci_addr = args[1];
     std.debug.print("PCI Address: {s}\n", .{pci_addr});
 
-    // 1. VFIOコンテナを作成
-    const container_fd = c.open("/dev/vfio/vfio", @as(c_int, c.O_RDWR), @as(c_uint, 0));
-    if (container_fd < 0) {
-        @panic("Failed to open /dev/vfio/vfio");
-    }
-    defer _ = c.close(container_fd);
+    // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
+    const bar0_path = try std.fs.path.join(allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
+    std.debug.print("BAR0 Path: {s}\n", .{bar0_path});
+    // BAR0 空間をmmap
+    const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
+    defer bar0_fd.close();
 }
