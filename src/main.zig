@@ -22,4 +22,25 @@ pub fn main() !void {
     // BAR0 空間をmmap
     const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
     defer bar0_fd.close();
+    const bar0_size = try bar0_fd.getEndPos();
+    const bar0_mmap = try std.posix.mmap(
+        null,
+        bar0_size,
+        std.posix.PROT.READ | std.posix.PROT.WRITE,
+        .{
+            .TYPE = .SHARED,
+        },
+        bar0_fd.handle,
+        0,
+    );
+    std.debug.print("BAR0 Mapped Size: {}\n", .{bar0_size});
+    // test: print BAR0 data
+    const bar0_data: []u8 = @ptrCast(bar0_mmap);
+    for (0..256) |i| {
+        if (i % 16 == 0) {
+            std.debug.print("\n{x:08}: ", .{i});
+        }
+        std.debug.print("{x:2} ", .{bar0_data[i]});
+    }
+    std.debug.print("\n", .{});
 }
