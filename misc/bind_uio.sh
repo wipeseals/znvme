@@ -44,5 +44,8 @@ if [ ! -e "/sys/bus/pci/drivers/vfio-pci/$PCI_ADDR" ]; then
   exit 1
 fi
 
+# allow read write access to the bar0 (for testing)
+chmod 666 "/sys/bus/pci/devices/$PCI_ADDR/resource0"
+
 echo "Successfully bound $PCI_ADDR to vfio-pci driver."
 lspci -k -s "$PCI_ADDR"
