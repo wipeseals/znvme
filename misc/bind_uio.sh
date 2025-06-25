@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/bin/bash -eux
 set -o pipefail
 
 if [ $# -lt 3 ]; then
@@ -25,6 +25,9 @@ fi
 
 # enable the uio_pci_generic driver
 sudo modprobe uio_pci_generic
+
+# set new_id for the uio_pci_generic driver (if not already set)
+echo "$VID $PID" | sudo tee "/sys/bus/pci/drivers/uio_pci_generic/new_id" || true
 
 # bind the uio_pci_generic driver to the device
 if [ ! -e "/sys/bus/pci/drivers/uio_pci_generic/$PCI_ADDR" ]; then
