@@ -1,43 +1,29 @@
 // src/main.zig
 const std = @import("std");
 
-// NVMe Specification 1.4 - Figure 9: Controller Registers
-// BAR0/BAR1にマップされるレジスタの構造体を定義します。
-// volatileアクセスを強制するため、packed structが適しています。
-const NvmeRegisters = packed struct {
-    cap: u64, // 0x00: Controller Capabilities
-    vs: u32, // 0x08: Version
-    intms: u32, // 0x0C: Interrupt Mask Set
-    intmc: u32, // 0x10: Interrupt Mask Clear
-    cc: CcFlags, // 0x14: Controller Configuration
-    _rsvd1: u32,
-    csts: u32, // 0x1C: Controller Status
-    nssr: u32, // 0x20: NVM Subsystem Reset (Optional)
-    aqa: u32, // 0x24: Admin Queue Attributes
-    asq: u64, // 0x28: Admin Submission Queue Base Address
-    acq: u64, // 0x30: Admin Completion Queue Base Address
-    // ...以降もレジスタは続くが、今回はここまでで十分
+const ControllerRegister = packed struct {
+    cap: u64, // 0x00 Controller Capabilities
+    vs: u32, // 0x08 Version
+    intms: u32, // 0x0C Interrupt Mask Set
+    intmc: u32, // 0x10 Interrupt Mask Clear
+    cc: u32, // 0x14 Controller Configuration
+    _rsvd1: u32, // 0x18 Reserved
+    csts: u32, // 0x1C Controller Status
+    nssr: u32, // 0x20 NVM Subsystem Reset (Optional)
+    aqa: u32, // 0x24 Admin Queue Attributes
+    asq: u64, // 0x28 Admin Submission Queue Base Address
+    acq: u64, // 0x30 Admin Completion Queue Base Address
 };
 
-// CC (Controller Configuration) レジスタのビットフィールド
-const CcFlags = packed struct {
-    EN: bool, // Bit 0: Enable
-    _rsvd1: u3,
-    CSS: u3, // Bit 4-6: Command Set Selected
-    MPS: u4, // Bit 7-10: Memory Page Size
-    AMS: u3, // Bit 11-13: Arbitration Mechanism Selected
-    SHN: u2, // Bit 14-15: Shutdown Notification
-    IOSQES: u4, // Bit 16-19: I/O Submission Queue Entry Size
-    IOCQES: u4, // Bit 20-23: I/O Completion Queue Entry Size
-    _rsvd2: u8,
-};
-
-// CSTS (Controller Status) レジスタのビットフィールド
-const CstsFlags = packed struct {
-    RDY: bool, // Bit 0: Ready
-    CFS: bool, // Bit 1: Controller Fatal Status
-    _rsvd: u30,
-};
+fn printHexdump(data: []const u8, len: usize) void {
+    for (0..len) |i| {
+        if (i % 16 == 0) {
+            std.debug.print("\n{x:08}: ", .{i});
+        }
+        std.debug.print("{x:02} ", .{data[i]});
+    }
+    std.debug.print("\n", .{});
+}
 
 pub fn main() !void {
     const allocator = std.heap.c_allocator;
@@ -77,11 +63,17 @@ pub fn main() !void {
 
     // test: print BAR0 data
     const bar0_data: []u8 = @ptrCast(bar0_mmap);
-    for (0..256) |i| {
-        if (i % 16 == 0) {
-            std.debug.print("\n{x:08}: ", .{i});
-        }
-        std.debug.print("{x:02} ", .{bar0_data[i]});
-    }
-    std.debug.print("\n", .{});
+    printHexdump(bar0_data, 256);
+    // test: cast to ControllerRegister
+    const ctrl_reg: *ControllerRegister = @ptrCast(bar0_mmap);
+    std.debug.print("Controller Capabilities: {x}\n", .{ctrl_reg.cap});
+    std.debug.print("Version: {x}\n", .{ctrl_reg.vs});
+    std.debug.print("Interrupt Mask Set: {x}\n", .{ctrl_reg.intms});
+    std.debug.print("Interrupt Mask Clear: {x}\n", .{ctrl_reg.intmc});
+    std.debug.print("Controller Configuration: {x}\n", .{ctrl_reg.cc});
+    std.debug.print("Controller Status: {x}\n", .{ctrl_reg.csts});
+    std.debug.print("NVM Subsystem Reset: {x}\n", .{ctrl_reg.nssr});
+    std.debug.print("Admin Queue Attributes: {x}\n", .{ctrl_reg.aqa});
+    std.debug.print("Admin Submission Queue Base Address: {x}\n", .{ctrl_reg.asq});
+    std.debug.print("Admin Completion Queue Base Address: {x}\n", .{ctrl_reg.acq});
 }
