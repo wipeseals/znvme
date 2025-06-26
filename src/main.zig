@@ -61,7 +61,9 @@ fn printHexdump(data: []const u8, len: usize) void {
 }
 
 pub fn main() !void {
-    const allocator = std.heap.c_allocator;
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
     // コマンドライン引数を取得
     const args = try std.process.argsAlloc(allocator);

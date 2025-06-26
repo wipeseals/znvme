@@ -64,7 +64,8 @@ pub fn build(b: *std.Build) void {
         .name = "znvme",
         .root_module = exe_mod,
     });
-    exe.linkLibC();
+    // if you want to link against a C library, you can do so like this:
+    // exe.linkLibC();
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
