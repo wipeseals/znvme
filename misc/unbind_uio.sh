@@ -1,4 +1,4 @@
-#!/bin/bash -eu
+#!/bin/bash -eux
 set -o pipefail
 
 if [ $# -lt 1 ]; then
