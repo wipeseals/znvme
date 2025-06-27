@@ -7,7 +7,7 @@ const ControllerRegister = packed struct {
     vs: SpecificationVersion, // 0x08 Version
     intms: u32, // 0x0C Interrupt Mask Set
     intmc: u32, // 0x10 Interrupt Mask Clear
-    cc: u32, // 0x14 Controller Configuration
+    cc: ControllerConfiguration, // 0x14 Controller Configuration
     _rsvd0: u32, // 0x18 Reserved
     csts: u32, // 0x1C Controller Status
     nssr: u32, // 0x20 NVM Subsystem Reset (Optional)
@@ -49,6 +49,30 @@ test "Specification Version Size" {
     const size = @sizeOf(SpecificationVersion);
     try expect(size == 4);
 }
+
+const ControllerConfiguration = packed struct {
+    en: u1, // [0]  Enable Controller
+    _rsv0: u3, // [3:1] Reserved
+    css: u3, // [6:4] Command Set Selected
+    mps: u4, // [10:7] Memory Page Size
+    ams: u3, // [13:11] Arbitration Mechanism Selected
+    shn: ShutdownNotification, // [15:14] Shutdown Notification
+    iosqes: u4, // [19:16] I/O Submission Queue Entry Size
+    iocqes: u4, // [23:20] I/O Completion Queue
+    crimen: u1, // [24]  Controller Readiness Indicator
+    _rsv1: u7, // [31:25] Reserved
+};
+test "Controller Configuration Size" {
+    const size = @sizeOf(ControllerConfiguration);
+    try expect(size == 4);
+}
+
+const ShutdownNotification = enum(u2) {
+    none = 0b00, // No notification and no effect
+    normal = 0b01, // Normal shutdown
+    abrupt = 0b10, // Abrupt shutdown
+    reserved = 0b11, // Reserved
+};
 
 fn printHexdump(data: []const u8, len: usize) void {
     for (0..len) |i| {
@@ -102,6 +126,6 @@ pub fn main() !void {
     const bar0_data: []u8 = @ptrCast(bar0_mmap);
     printHexdump(bar0_data, 256);
     // test: cast to ControllerRegister
-    const ctrl_reg: *ControllerRegister = @ptrCast(bar0_mmap);
+    const ctrl_reg: *volatile ControllerRegister = @ptrCast(bar0_mmap);
     std.debug.print("{}\n", .{ctrl_reg});
 }
