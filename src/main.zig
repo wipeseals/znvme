@@ -1,10 +1,33 @@
 // src/main.zig
 const std = @import("std");
 const expect = std.testing.expect;
+const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
-const page_size_min = std.heap.page_size_min;
+/// Device status enumeration
+const DeviceStatus = enum {
+    /// EN = 0, RDY = *, SHST = 0, CFS = 0
+    /// Device is not enabled
+    Disabled,
+    /// EN = 1, RDY = 0, SHST = 0, CFS = 0
+    /// Device is enabled but not ready
+    Enabling,
+    /// EN = 1, RDY = 1, SHST = 0, CFS = 0
+    /// Device is enabled and ready
+    Enabled,
+    /// EN = 1, RDY = 1, SHST = 1, CFS = 0
+    /// Device is enabled, ready, and in a shutdown state
+    ShutdownInProgress,
+    /// EN = 1, RDY = 1, SHST = 2, CFS = 0
+    /// Device is enabled, ready, and has been shut down
+    Shutdown,
+    /// EN = *, RDY = *, SHST = *, CFS = 1
+    /// Device is in a fatal error state
+    FatalError,
+    /// Other states not covered by the above
+    Other,
+};
 const NvmDevice = struct {
     pci_addr: []const u8,
     bar0_fd: std.fs.File,
@@ -48,6 +71,36 @@ const NvmDevice = struct {
         std.posix.munmap(self.ctrl_reg_map);
         self.bar0_fd.close();
     }
+
+    /// print hexdump of the controller registers.
+    pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
+        try printHexdump(writer, self.ctrl_reg_map, @sizeOf(ControllerRegister));
+    }
+
+    /// Get the status of the NVM device based on the controller registers.
+    pub fn status(self: *const NvmDevice) DeviceStatus {
+        const en = self.ctrl_reg.cc.en;
+        const rdy = self.ctrl_reg.csts.rdy;
+        const shst = self.ctrl_reg.csts.shst;
+        const cfs = self.ctrl_reg.csts.cfs;
+
+        const ret = switch (cfs) {
+            0 => switch (shst) {
+                ShutdownStatus.normal => switch (en) {
+                    0 => DeviceStatus.Disabled,
+                    1 => switch (rdy) {
+                        0 => DeviceStatus.Enabling,
+                        1 => DeviceStatus.Enabled,
+                    },
+                },
+                ShutdownStatus.shutdownInProgress => DeviceStatus.ShutdownInProgress,
+                ShutdownStatus.shutdown => DeviceStatus.Shutdown,
+                else => unreachable,
+            },
+            1 => DeviceStatus.FatalError,
+        };
+        return ret;
+    }
 };
 
 const ControllerRegister = packed struct {
@@ -57,7 +110,7 @@ const ControllerRegister = packed struct {
     intmc: u32, // 0x10 Interrupt Mask Clear
     cc: ControllerConfiguration, // 0x14 Controller Configuration
     _rsvd0: u32, // 0x18 Reserved
-    csts: u32, // 0x1C Controller Status
+    csts: ControllerStatus, // 0x1C Controller Status
     nssr: u32, // 0x20 NVM Subsystem Reset (Optional)
     aqa: u32, // 0x24 Admin Queue Attributes
     asq: u64, // 0x28 Admin Submission Queue Base Address
@@ -146,6 +199,22 @@ const ShutdownNotification = enum(u2) {
     reserved = 0b11, // Reserved
 };
 
+const ShutdownStatus = enum(u2) {
+    normal = 0b00, // Normal operation
+    shutdownInProgress = 0b01, // Shutdown in progress
+    shutdown = 0b10, // Shutdown completed
+    reserved = 0b11, // Reserved
+};
+const ControllerStatus = packed struct {
+    rdy: u1, // [0] Ready
+    cfs: u1, // [1] Controller Fatal Status
+    shst: ShutdownStatus, // [3:2] Shutdown Status
+    nssro: u1, // [4] NVM Subsystem Reset Occurred
+    pp: u1, // [5] Processing Paused
+    st: u1, // [6] Shutdown Type 1 = NVM Subsystem Reset, 0 = Controller Level Resets
+    _rsvd0: u25, // [31:07] Reserved
+};
+
 fn printHexdump(writer: anytype, data: []const u8, len: usize) !void {
     for (0..len) |i| {
         if (i % 16 == 0) {
@@ -161,6 +230,7 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
 
     // コマンドライン引数を取得
@@ -178,6 +248,7 @@ pub fn main() !void {
 
     if (res.args.help != 0)
         return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+    const verbose = res.args.verbose != 0;
 
     const pci_addr: []const u8 = res.positionals[0] orelse {
         try stderr.print("PCI address is required.\n", .{});
@@ -185,12 +256,18 @@ pub fn main() !void {
     };
     const device = try NvmDevice.open(pci_addr);
     defer device.close();
-    {
+    const status = device.status();
+    if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
-        try stderr.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}\n", .{
+        try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
             pci_addr,
             version,
+            status,
         });
+        try stdout.print("Controller Register Raw:", .{});
+        try device.printRaw(stdout);
+
+        try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
 }

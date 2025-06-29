@@ -14,7 +14,7 @@
 		{
 			"type": "shell",
 			"label": "zig build run",
-			"command": "zig build run -- ${input:pcidev}",
+			"command": "zig build run -- ${input:pcidev} -v",
 			"group": "build",
 			"isBackground": false,
 			"problemMatcher": [
