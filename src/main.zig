@@ -2,6 +2,54 @@
 const std = @import("std");
 const expect = std.testing.expect;
 
+const clap = @import("clap");
+
+const page_size_min = std.heap.page_size_min;
+const NvmDevice = struct {
+    pci_addr: []const u8,
+    bar0_fd: std.fs.File,
+    ctrl_reg_map: []align(page_size_min) u8,
+    ctrl_reg: *volatile ControllerRegister,
+
+    /// Initialize the NVM device by mapping the controller registers from BAR0.
+    pub fn open(pci_addr: []const u8) !NvmDevice {
+        // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
+        const bar0_path = try std.fs.path.join(std.heap.page_allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
+        const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
+        errdefer bar0_fd.close();
+        const bar0_size = try bar0_fd.getEndPos();
+
+        // Map BAR0
+        const ctrl_reg_map = try std.posix.mmap(
+            null,
+            bar0_size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{
+                .TYPE = .SHARED,
+            },
+            bar0_fd.handle,
+            0,
+        );
+        errdefer std.posix.munmap(ctrl_reg_map);
+        const ctrl_reg: *volatile ControllerRegister = @ptrCast(ctrl_reg_map);
+        if (!ctrl_reg.isValid()) {
+            return error.InvalidControllerRegister;
+        }
+        return NvmDevice{
+            .pci_addr = pci_addr,
+            .bar0_fd = bar0_fd,
+            .ctrl_reg_map = ctrl_reg_map,
+            .ctrl_reg = ctrl_reg,
+        };
+    }
+
+    /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
+    pub fn close(self: NvmDevice) void {
+        std.posix.munmap(self.ctrl_reg_map);
+        self.bar0_fd.close();
+    }
+};
+
 const ControllerRegister = packed struct {
     cap: ControllerCapabilities, // 0x00 Controller Capabilities
     vs: SpecificationVersion, // 0x08 Version
@@ -103,40 +151,29 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    const stderr = std.io.getStdErr().writer();
+
     // コマンドライン引数を取得
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
-
-    if (args.len != 2) {
-        std.debug.print("Usage: toynvme [pci_address]\n", .{});
-        std.debug.print(" - [pci_address] 0000:01:00.0\n", .{});
-        return;
-    }
-    // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
-    const pci_addr = args[1];
-    const bar0_path = try std.fs.path.join(allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
-    const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
-    defer bar0_fd.close();
-    const bar0_size = try bar0_fd.getEndPos();
-
-    // Map BAR0
-    const ctrl_reg_raw = try std.posix.mmap(
-        null,
-        bar0_size,
-        std.posix.PROT.READ | std.posix.PROT.WRITE,
-        .{
-            .TYPE = .SHARED,
-        },
-        bar0_fd.handle,
-        0,
+    const params = comptime clap.parseParamsComptime(
+        \\-h, --help             Display this help and exit.
+        \\-v, --verbose          Increase verbosity of output.
+        \\<str>                  PCI address of the NVMe controller (e.g., 0000:00:1f.2).
     );
-    defer std.posix.munmap(ctrl_reg_raw);
-    const ctrl_reg: *volatile ControllerRegister = @ptrCast(ctrl_reg_raw);
-    if (!ctrl_reg.isValid()) {
-        const stderr = std.io.getStdErr().writer();
-        try stderr.print("Invalid Controller Register\n", .{});
-        try stderr.print("{}\n", .{ctrl_reg});
-        try printHexdump(stderr, ctrl_reg_raw, 256);
-        return;
-    }
+    var diag = clap.Diagnostic{};
+    var res = clap.parse(clap.Help, &params, clap.parsers.default, .{ .diagnostic = &diag, .allocator = allocator }) catch |err| {
+        diag.report(stderr, err) catch {};
+        return err;
+    };
+    defer res.deinit();
+
+    if (res.args.help != 0)
+        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+
+    const pci_addr: []const u8 = res.positionals[0] orelse {
+        try stderr.print("PCI address is required.\n", .{});
+        return error.InvalidArgument;
+    };
+    const device = try NvmDevice.open(pci_addr);
+    defer device.close();
+    try stderr.print("Initialized NVMe device at PCI address: {s}\n", .{pci_addr});
 }
