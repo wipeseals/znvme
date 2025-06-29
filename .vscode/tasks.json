@@ -3,6 +3,16 @@
 	"tasks": [
 		{
 			"type": "shell",
+			"label": "zig build",
+			"command": "zig build",
+			"group": "build",
+			"isBackground": false,
+			"problemMatcher": [
+				"$zig"
+			]
+		},
+		{
+			"type": "shell",
 			"label": "zig build run",
 			"command": "zig build run -- ${input:pcidev}",
 			"group": "build",

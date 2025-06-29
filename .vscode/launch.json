@@ -1,0 +1,24 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug znvme",
+      "program": "${workspaceFolder}/zig-out/bin/znvme",
+      "args": [
+        "${input:pciAddress}"
+      ],
+      "preLaunchTask": "zig build",
+      "cwd": "${workspaceFolder}",
+      "console": "integratedTerminal"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "pciAddress",
+      "type": "promptString",
+      "description": "Enter PCI device address (e.g. 0000:01:00.0)"
+    }
+  ]
+}

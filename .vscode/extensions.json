@@ -1,5 +1,6 @@
 {
     "recommendations": [
-        "ziglang.vscode-zig"
+        "ziglang.vscode-zig",
+        "vadimcn.vscode-lldb"
     ]
 }
