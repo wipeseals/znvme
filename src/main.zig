@@ -133,9 +133,9 @@ const ControllerRegister = packed struct {
     pub fn nvmVersionStr(self: *const volatile ControllerRegister, allocator: std.mem.Allocator) ![]const u8 {
         // Format the version as "MAJOR.MINOR.TERSE"
         const version = try std.fmt.allocPrint(allocator, "{d}.{d}.{d}", .{
-            self.vs.ter,
             self.vs.maj,
             self.vs.min,
+            self.vs.ter,
         });
         return version;
     }
@@ -143,6 +143,46 @@ const ControllerRegister = packed struct {
 test "Controller Register Size" {
     const size = @sizeOf(ControllerRegister);
     try expect(size == 64);
+}
+
+test "NVMe Version String Format" {
+    const allocator = std.testing.allocator;
+    
+    // Test case 1: Version 1.4.0 (the issue case)
+    var ctrl_reg = ControllerRegister{
+        .cap = undefined,
+        .vs = SpecificationVersion{
+            .ter = 0,   // Terse version
+            .min = 4,   // Minor version  
+            .maj = 1,   // Major version
+        },
+        .intms = 0,
+        .intmc = 0,
+        .cc = undefined,
+        ._rsvd0 = 0,
+        .csts = undefined,
+        .nssr = 0,
+        .aqa = 0,
+        .asq = 0,
+        .acq = 0,
+    };
+    
+    const version_str = try ctrl_reg.nvmVersionStr(allocator);
+    defer allocator.free(version_str);
+    
+    // Should format as MAJOR.MINOR.TERSE = 1.4.0
+    try expect(std.mem.eql(u8, version_str, "1.4.0"));
+    
+    // Test case 2: Version 2.0.1 (different values)
+    ctrl_reg.vs.maj = 2;
+    ctrl_reg.vs.min = 0;
+    ctrl_reg.vs.ter = 1;
+    
+    const version_str2 = try ctrl_reg.nvmVersionStr(allocator);
+    defer allocator.free(version_str2);
+    
+    // Should format as MAJOR.MINOR.TERSE = 2.0.1
+    try expect(std.mem.eql(u8, version_str2, "2.0.1"));
 }
 const ControllerCapabilities = packed struct {
     mqes: u16, // [15:0]  Maximum Queues Supported
