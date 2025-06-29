@@ -76,6 +76,16 @@ const ControllerRegister = packed struct {
         }
         return true;
     }
+
+    pub fn nvmVersionStr(self: *const volatile ControllerRegister, allocator: std.mem.Allocator) ![]const u8 {
+        // Format the version as "MAJOR.MINOR.TERSE"
+        const version = try std.fmt.allocPrint(allocator, "{d}.{d}.{d}", .{
+            self.vs.ter,
+            self.vs.maj,
+            self.vs.min,
+        });
+        return version;
+    }
 };
 test "Controller Register Size" {
     const size = @sizeOf(ControllerRegister);
@@ -104,8 +114,8 @@ test "Controller Capabilities Size" {
 }
 const SpecificationVersion = packed struct {
     ter: u8, // [7:0]  Terse Version
-    maj: u8, // [15:8] Major Version
-    min: u16, // [31:16] Minor Version
+    min: u8, // [15:8] Minor Version
+    maj: u16, // [31:16] Major Version
 };
 test "Specification Version Size" {
     const size = @sizeOf(SpecificationVersion);
@@ -175,5 +185,12 @@ pub fn main() !void {
     };
     const device = try NvmDevice.open(pci_addr);
     defer device.close();
-    try stderr.print("Initialized NVMe device at PCI address: {s}\n", .{pci_addr});
+    {
+        const version = try device.ctrl_reg.nvmVersionStr(allocator);
+        defer allocator.free(version);
+        try stderr.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}\n", .{
+            pci_addr,
+            version,
+        });
+    }
 }
