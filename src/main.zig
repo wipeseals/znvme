@@ -48,6 +48,10 @@ const NvmDevice = struct {
         std.posix.munmap(self.ctrl_reg_map);
         self.bar0_fd.close();
     }
+
+    pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
+        try printHexdump(writer, self.ctrl_reg_map, @sizeOf(ControllerRegister));
+    }
 };
 
 const ControllerRegister = packed struct {
@@ -161,6 +165,7 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
+    const stdout = std.io.getStdOut().writer();
     const stderr = std.io.getStdErr().writer();
 
     // コマンドライン引数を取得
@@ -178,6 +183,7 @@ pub fn main() !void {
 
     if (res.args.help != 0)
         return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+    const verbose = res.args.verbose != 0;
 
     const pci_addr: []const u8 = res.positionals[0] orelse {
         try stderr.print("PCI address is required.\n", .{});
@@ -185,12 +191,16 @@ pub fn main() !void {
     };
     const device = try NvmDevice.open(pci_addr);
     defer device.close();
-    {
+    if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
-        try stderr.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}\n", .{
+        try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}\n", .{
             pci_addr,
             version,
         });
+        try stdout.print("Controller Register Raw:", .{});
+        try device.printRaw(stdout);
+
+        try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
 }
