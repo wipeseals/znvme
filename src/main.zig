@@ -14,6 +14,20 @@ const ControllerRegister = packed struct {
     aqa: u32, // 0x24 Admin Queue Attributes
     asq: u64, // 0x28 Admin Submission Queue Base Address
     acq: u64, // 0x30 Admin Completion Queue Base Address
+
+    /// is the controller register valid?
+    pub fn isValid(self: *const volatile ControllerRegister) bool {
+        if (self.cap.mqes == 0) {
+            return false; // Maximum Queues Supported must be non-zero
+        }
+        if (self.cap.cssNvm != 1) {
+            return false; // Command Set Supported must be NVM
+        }
+        if (self.vs.maj == 0 and self.vs.min == 0) {
+            return false; // Version must be non-zero
+        }
+        return true;
+    }
 };
 test "Controller Register Size" {
     const size = @sizeOf(ControllerRegister);
@@ -74,14 +88,14 @@ const ShutdownNotification = enum(u2) {
     reserved = 0b11, // Reserved
 };
 
-fn printHexdump(data: []const u8, len: usize) void {
+fn printHexdump(writer: anytype, data: []const u8, len: usize) !void {
     for (0..len) |i| {
         if (i % 16 == 0) {
-            std.debug.print("\n{x:08}: ", .{i});
+            try writer.print("\n{x:08}: ", .{i});
         }
-        std.debug.print("{x:02} ", .{data[i]});
+        try writer.print("{x:02} ", .{data[i]});
     }
-    std.debug.print("\n", .{});
+    try writer.print("\n", .{});
 }
 
 pub fn main() !void {
@@ -98,19 +112,15 @@ pub fn main() !void {
         std.debug.print(" - [pci_address] 0000:01:00.0\n", .{});
         return;
     }
-    const pci_addr = args[1];
-    std.debug.print("PCI Address: {s}\n", .{pci_addr});
-
     // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
+    const pci_addr = args[1];
     const bar0_path = try std.fs.path.join(allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
-    std.debug.print("BAR0 Path: {s}\n", .{bar0_path});
-    // BAR0 空間をmmap
     const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
     defer bar0_fd.close();
     const bar0_size = try bar0_fd.getEndPos();
-    std.debug.print("BAR0 Mapped Size: {}\n", .{bar0_size});
 
-    const bar0_mmap = try std.posix.mmap(
+    // Map BAR0
+    const ctrl_reg_raw = try std.posix.mmap(
         null,
         bar0_size,
         std.posix.PROT.READ | std.posix.PROT.WRITE,
@@ -120,12 +130,13 @@ pub fn main() !void {
         bar0_fd.handle,
         0,
     );
-    defer std.posix.munmap(bar0_mmap);
-
-    // test: print BAR0 data
-    const bar0_data: []u8 = @ptrCast(bar0_mmap);
-    printHexdump(bar0_data, 256);
-    // test: cast to ControllerRegister
-    const ctrl_reg: *volatile ControllerRegister = @ptrCast(bar0_mmap);
-    std.debug.print("{}\n", .{ctrl_reg});
+    defer std.posix.munmap(ctrl_reg_raw);
+    const ctrl_reg: *volatile ControllerRegister = @ptrCast(ctrl_reg_raw);
+    if (!ctrl_reg.isValid()) {
+        const stderr = std.io.getStdErr().writer();
+        try stderr.print("Invalid Controller Register\n", .{});
+        try stderr.print("{}\n", .{ctrl_reg});
+        try printHexdump(stderr, ctrl_reg_raw, 256);
+        return;
+    }
 }
