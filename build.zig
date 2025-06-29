@@ -67,6 +67,9 @@ pub fn build(b: *std.Build) void {
     // if you want to link against a C library, you can do so like this:
     // exe.linkLibC();
 
+    const clap = b.dependency("clap", .{});
+    exe.root_module.addImport("clap", clap.module("clap"));
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).
