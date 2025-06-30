@@ -7,19 +7,22 @@ const clap = @import("clap");
 
 /// Device status enumeration
 const DeviceStatus = enum {
-    /// EN = 0, RDY = *, SHST = 0, CFS = 0
+    /// EN = 0, RDY = *, SHN = 0, SHST = 0, CFS = 0
     /// Device is not enabled
     Disabled,
-    /// EN = 1, RDY = 0, SHST = 0, CFS = 0
+    /// EN = 1, RDY = 0, SHN = 0, SHST = 0, CFS = 0
     /// Device is enabled but not ready
     Enabling,
-    /// EN = 1, RDY = 1, SHST = 0, CFS = 0
+    /// EN = 1, RDY = 1, SHN = 0, SHST = 0, CFS = 0
     /// Device is enabled and ready
     Enabled,
-    /// EN = 1, RDY = 1, SHST = 1, CFS = 0
+    /// EN = 1, RDY = 1, SHN != 0, SHST = 0, CFS = 0
+    NotifyingShutdown,
+    /// Device is enabled, ready, and in a shutdown state
+    /// EN = 1, RDY = 1, SHN != 0,  SHST = 1, CFS = 0
     /// Device is enabled, ready, and in a shutdown state
     ShutdownInProgress,
-    /// EN = 1, RDY = 1, SHST = 2, CFS = 0
+    /// EN = 1, RDY = 1, SHN != 0,  SHST = 2, CFS = 0
     /// Device is enabled, ready, and has been shut down
     Shutdown,
     /// EN = *, RDY = *, SHST = *, CFS = 1
@@ -81,6 +84,7 @@ const NvmDevice = struct {
     pub fn status(self: *const NvmDevice) DeviceStatus {
         const en = self.ctrl_reg.cc.en;
         const rdy = self.ctrl_reg.csts.rdy;
+        const shn = self.ctrl_reg.cc.shn;
         const shst = self.ctrl_reg.csts.shst;
         const cfs = self.ctrl_reg.csts.cfs;
 
@@ -90,7 +94,12 @@ const NvmDevice = struct {
                     0 => DeviceStatus.Disabled,
                     1 => switch (rdy) {
                         0 => DeviceStatus.Enabling,
-                        1 => DeviceStatus.Enabled,
+                        1 => switch (shn) {
+                            ShutdownNotification.none => DeviceStatus.Enabled,
+                            ShutdownNotification.normal => DeviceStatus.NotifyingShutdown,
+                            ShutdownNotification.abrupt => DeviceStatus.NotifyingShutdown,
+                            ShutdownNotification.reserved => unreachable,
+                        },
                     },
                 },
                 ShutdownStatus.shutdownInProgress => DeviceStatus.ShutdownInProgress,
@@ -147,14 +156,14 @@ test "Controller Register Size" {
 
 test "NVMe Version String Format" {
     const allocator = std.testing.allocator;
-    
+
     // Test case 1: Version 1.4.0 (the issue case)
     var ctrl_reg = ControllerRegister{
         .cap = undefined,
         .vs = SpecificationVersion{
-            .ter = 0,   // Terse version
-            .min = 4,   // Minor version  
-            .maj = 1,   // Major version
+            .ter = 0, // Terse version
+            .min = 4, // Minor version
+            .maj = 1, // Major version
         },
         .intms = 0,
         .intmc = 0,
@@ -166,21 +175,21 @@ test "NVMe Version String Format" {
         .asq = 0,
         .acq = 0,
     };
-    
+
     const version_str = try ctrl_reg.nvmVersionStr(allocator);
     defer allocator.free(version_str);
-    
+
     // Should format as MAJOR.MINOR.TERSE = 1.4.0
     try expect(std.mem.eql(u8, version_str, "1.4.0"));
-    
+
     // Test case 2: Version 2.0.1 (different values)
     ctrl_reg.vs.maj = 2;
     ctrl_reg.vs.min = 0;
     ctrl_reg.vs.ter = 1;
-    
+
     const version_str2 = try ctrl_reg.nvmVersionStr(allocator);
     defer allocator.free(version_str2);
-    
+
     // Should format as MAJOR.MINOR.TERSE = 2.0.1
     try expect(std.mem.eql(u8, version_str2, "2.0.1"));
 }
