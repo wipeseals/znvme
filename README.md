@@ -137,6 +137,8 @@ Node                  Generic               SN                   Model          
 ## References
 
 - [NVMe Specification](https://nvmexpress.org/specifications/)
+  - [NVM Express Base Specification Revision 2.1](https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-Revision-2.1-2024.08.05-Ratified.pdf)
+  - [NVM Express PCI Express Transport Specification Revision 1.1](https://nvmexpress.org/wp-content/uploads/NVM-Express-PCI-Express-Transport-Specification-Revision-1.1-2024.08.05-Ratified.pdf)
 
 
 ## License
