@@ -5,6 +5,59 @@ const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
+/// NVMe Submission Queue Entry structure
+/// TODO: union support for Vendor Specific, ...
+const SubmissionQueueEntry = packed struct {
+    cdw0: SQDword0, // Submission Queue Dword 0
+    nsid: u32, // Namespace Identifier
+    cdw2: u32, // Command Dword 2
+    cdw3: u32, // Command Dword 3
+    mptr: u32, // Metadata Pointer
+    dptr: SQDataPointer, // Data Pointer
+    cdw10: u32, // Command Dword 10
+    cdw11: u32, // Command Dword 11
+    cdw12: u32, // Command Dword 12
+    cdw13: u32, // Command Dword 13
+    cdw14: u32, // Command Dword 14
+    cdw15: u32, // Command Dword 15
+};
+test "Submission Queue Size" {
+    const size = @sizeOf(SubmissionQueueEntry);
+    try expect(size == 64); // 16 * u32 = 64 bytes
+}
+/// Submission Queue Dword 0 structure
+const SQDword0 = packed struct {
+    opc: u8, // [7:0]  Opcode
+    fuse: u2, // [9:8]  Fused Operation
+    _rsvd0: u4, // [13:10] Reserved
+    psdt: u2, // [15:14] PRP or SGL Data Transfer
+    cid: u16, // [31:16] Command Identifier
+};
+/// Completion Queue structure
+/// TODO: SGL support
+const SQDataPointer = packed struct {
+    prp1: u32, // [31:0] PRP Entry 1
+    prp2: u32, // [63:32] PRP Entry 2
+};
+
+const CompletionQueueEntry = packed struct {
+    dw0: u32, // Command Specific Dword 0
+    dw1: u32, // Command Specific Dword 1
+    sqhd: u16, // Submission Queue Head Pointer
+    sqid: u16, // Submission Queue Identifier
+    cid: u16, // Command Identifier
+    p: u1, // Phase Tag
+    sc: u8, // Status Code
+    sct: u3, // Status Code Type
+    crd: u2, // Command Retry Delay
+    more: u1, // More
+    dnr: u1, // Do Not Retry
+};
+test "Completion Queue Size" {
+    const size = @sizeOf(CompletionQueueEntry);
+    try expect(size == 16);
+}
+
 /// Device status enumeration
 const DeviceStatus = enum {
     /// EN = 0, RDY = *, SHN = 0, SHST = 0, CFS = 0
@@ -31,14 +84,29 @@ const DeviceStatus = enum {
     /// Other states not covered by the above
     Other,
 };
+/// Configuration for the NVM device
+const NvmDeviceConfig = struct {
+    /// Timeout for controller reset in seconds
+    timeout_sec: u32 = 10,
+    /// Prefer the CAP.TO setting
+    prefer_cap_to: bool = true,
+
+    pub fn default() NvmDeviceConfig {
+        return NvmDeviceConfig{
+            .timeout_sec = 10,
+            .prefer_cap_to = true,
+        };
+    }
+};
 const NvmDevice = struct {
     pci_addr: []const u8,
+    config: NvmDeviceConfig,
     bar0_fd: std.fs.File,
     ctrl_reg_map: []align(page_size_min) u8,
     ctrl_reg: *volatile ControllerRegister,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
-    pub fn open(pci_addr: []const u8) !NvmDevice {
+    pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
         // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
         const bar0_path = try std.fs.path.join(std.heap.page_allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
         const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
@@ -63,6 +131,7 @@ const NvmDevice = struct {
         }
         return NvmDevice{
             .pci_addr = pci_addr,
+            .config = config.*,
             .bar0_fd = bar0_fd,
             .ctrl_reg_map = ctrl_reg_map,
             .ctrl_reg = ctrl_reg,
@@ -109,6 +178,49 @@ const NvmDevice = struct {
             1 => DeviceStatus.FatalError,
         };
         return ret;
+    }
+    pub fn timeoutSec(self: *const NvmDevice) u32 {
+        if (self.config.prefer_cap_to & self.ctrl_reg.cap.to != 0) {
+            return self.ctrl_reg.cap.to;
+        } else {
+            return self.config.timeout_sec;
+        }
+    }
+    fn isTimeoutExceeded(self: *const NvmDevice, start: u64) bool {
+        const timeout_ms = self.timeoutSec() * 1000;
+        return (std.time.milliTimestamp() - start) > timeout_ms;
+    }
+    /// Controller Reset
+    pub fn resetController(self: *NvmDevice) !void {
+        // set en = 0 to disable the controller
+        {
+            self.ctrl_reg.cc.en = 0;
+            const start = std.time.milliTimestamp();
+            while (self.ctrl_reg.csts.rdy != 0) {
+                if (self.isTimeoutExceeded(start)) {
+                    return error.Timeout;
+                }
+            }
+        }
+        // TODO: vfio physical address space
+        // allocate ASQ and ACQ
+        // const size = @sizeOf(u32) * self.ctrl_reg.cap.mqes;
+        // const asq = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, size);
+        // const acq = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, size);
+
+        // set ASQ, ACQ, AQA
+        self.ctrl_reg.aqa = 0; // depth = 1
+
+        // set en = 1 to enable the controller
+        {
+            self.ctrl_reg.cc.en = 1;
+            const start = std.time.milliTimestamp();
+            while (self.ctrl_reg.csts.rdy != 1) {
+                if (self.isTimeoutExceeded(start)) {
+                    return error.Timeout;
+                }
+            }
+        }
     }
 };
 
@@ -286,6 +398,7 @@ pub fn main() !void {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
         \\-v, --verbose          Increase verbosity of output.
+        \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
         \\<str>                  PCI address of the NVMe controller (e.g., 0000:00:1f.2).
     );
     var diag = clap.Diagnostic{};
@@ -303,7 +416,16 @@ pub fn main() !void {
         try stderr.print("PCI address is required.\n", .{});
         return error.InvalidArgument;
     };
-    const device = try NvmDevice.open(pci_addr);
+    var config = NvmDeviceConfig.default();
+    if (res.args.timeout) |timeout| {
+        if (timeout < 1) {
+            try stderr.print("Timeout must be at least 1 second.\n", .{});
+            return error.InvalidArgument;
+        }
+        config.timeout_sec = timeout;
+        config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
+    }
+    const device = try NvmDevice.open(pci_addr, &config);
     defer device.close();
     const status = device.status();
     if (verbose) {
