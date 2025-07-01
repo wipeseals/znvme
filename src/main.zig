@@ -477,11 +477,12 @@ pub fn main() !void {
 
     if (res.args.help != 0)
         return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+
     const verbose = res.args.verbose != 0;
 
     const pci_addr: []const u8 = res.positionals[0] orelse {
         try stderr.print("PCI address is required.\n", .{});
-        return error.InvalidArgument;
+        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
     };
 
     // TODO: readlink -f /sys/bus/pci/devices/<pci_addr>/iommu_group  相当を行ってgroup_numを取得できるはず
