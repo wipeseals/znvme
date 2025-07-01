@@ -5,6 +5,16 @@ const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
+// VFIO用Cヘッダのインクルード
+const c = @cImport({
+    @cInclude("linux/vfio.h");
+    @cInclude("sys/ioctl.h");
+    @cInclude("fcntl.h");
+    @cInclude("sys/mman.h");
+    @cInclude("unistd.h");
+    @cInclude("stdint.h");
+});
+
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...
 const SubmissionQueueEntry = packed struct {
@@ -101,47 +111,103 @@ const NvmDeviceConfig = struct {
 const NvmDevice = struct {
     pci_addr: []const u8,
     config: NvmDeviceConfig,
-    bar0_fd: std.fs.File,
+    vfio_container_fd: std.posix.fd_t,
+    vfio_group_fd: std.posix.fd_t,
+    vfio_device_fd: std.posix.fd_t,
     ctrl_reg_map: []align(page_size_min) u8,
     ctrl_reg: *volatile ControllerRegister,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
-    pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
-        // BAR0 空間 (/sys/bus/pci/devices/[pci_address]/resource0) のパスを取得
-        const bar0_path = try std.fs.path.join(std.heap.page_allocator, &.{ "/sys/bus/pci/devices/", pci_addr, "/resource0" });
-        const bar0_fd = try std.fs.openFileAbsolute(bar0_path, .{ .mode = .read_write });
-        errdefer bar0_fd.close();
-        const bar0_size = try bar0_fd.getEndPos();
+    pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
+        // --- VFIO経由でデバイスをopen・BAR0マップ ---
+        var vfio_container_fd: std.posix.fd_t = -1;
+        var vfio_group_fd: std.posix.fd_t = -1;
+        var vfio_device_fd: std.posix.fd_t = -1;
+        var bar0_map: []align(page_size_min) u8 = &[_]u8{};
 
-        // Map BAR0
-        const ctrl_reg_map = try std.posix.mmap(
+        // errdeferを使ったクリーンアップ
+        errdefer {
+            if (bar0_map.len > 0) std.posix.munmap(bar0_map);
+            if (vfio_device_fd != -1) std.posix.close(vfio_device_fd);
+            if (vfio_group_fd != -1) std.posix.close(vfio_group_fd);
+            if (vfio_container_fd != -1) std.posix.close(vfio_container_fd);
+        }
+
+        // 1. /dev/vfio/vfio をopen (コンテナFD)
+        vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
+
+        // 2. /dev/vfio/<group> をopen
+        const vfio_group_path = try std.fmt.allocPrint(std.heap.page_allocator, "/dev/vfio/{d}", .{group_num});
+        defer std.heap.page_allocator.free(vfio_group_path);
+        vfio_group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
+
+        // 3. VFIO ioctlシーケンス
+        var group_status: c.struct_vfio_group_status = .{ .argsz = @sizeOf(c.struct_vfio_group_status) };
+        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status) != 0 or group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+            return error.VfioGroupNotViable;
+        }
+        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd) != 0) {
+            return error.VfioSetContainerFailed;
+        }
+        var iommu_type: c_int = c.VFIO_TYPE1_IOMMU;
+        if (c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type) != 0) {
+            return error.VfioSetIommuFailed;
+        }
+        var pci_addr_cstr: [32]u8 = undefined;
+        @memcpy(pci_addr_cstr[0..pci_addr.len], pci_addr);
+        pci_addr_cstr[pci_addr.len] = 0;
+        const fd_result = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_DEVICE_FD, &pci_addr_cstr);
+        if (fd_result < 0) return error.VfioGetDeviceFdFailed;
+        vfio_device_fd = @intCast(fd_result);
+
+        // 4. BAR0情報取得
+        var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
+        region_info.index = c.VFIO_PCI_BAR0_REGION_INDEX;
+        if (c.ioctl(vfio_device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &region_info) != 0) {
+            return error.VfioGetRegionInfoFailed;
+        }
+
+        // 5. BAR0をmmap
+        bar0_map = try std.posix.mmap(
             null,
-            bar0_size,
+            region_info.size,
             std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{
-                .TYPE = .SHARED,
-            },
-            bar0_fd.handle,
-            0,
+            .{ .TYPE = .SHARED },
+            vfio_device_fd,
+            region_info.offset,
         );
-        errdefer std.posix.munmap(ctrl_reg_map);
-        const ctrl_reg: *volatile ControllerRegister = @ptrCast(ctrl_reg_map);
+
+        const ctrl_reg: *volatile ControllerRegister = @ptrCast(bar0_map.ptr);
         if (!ctrl_reg.isValid()) {
             return error.InvalidControllerRegister;
         }
-        return NvmDevice{
+
+        // 成功したのでリソースの所有権をムーブ
+        const dev = NvmDevice{
             .pci_addr = pci_addr,
             .config = config.*,
-            .bar0_fd = bar0_fd,
-            .ctrl_reg_map = ctrl_reg_map,
+            .vfio_container_fd = vfio_container_fd,
+            .vfio_group_fd = vfio_group_fd,
+            .vfio_device_fd = vfio_device_fd,
+            .ctrl_reg_map = bar0_map,
             .ctrl_reg = ctrl_reg,
         };
+
+        // errdeferが発動しないように-1をセット
+        vfio_container_fd = -1;
+        vfio_group_fd = -1;
+        vfio_device_fd = -1;
+        bar0_map = &[_]u8{};
+
+        return dev;
     }
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
     pub fn close(self: NvmDevice) void {
         std.posix.munmap(self.ctrl_reg_map);
-        self.bar0_fd.close();
+        std.posix.close(self.vfio_device_fd);
+        std.posix.close(self.vfio_group_fd);
+        std.posix.close(self.vfio_container_fd);
     }
 
     /// print hexdump of the controller registers.
@@ -400,6 +466,7 @@ pub fn main() !void {
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
         \\<str>                  PCI address of the NVMe controller (e.g., 0000:00:1f.2).
+        \\<u32>                  IOMMU group number (required).
     );
     var diag = clap.Diagnostic{};
     var res = clap.parse(clap.Help, &params, clap.parsers.default, .{ .diagnostic = &diag, .allocator = allocator }) catch |err| {
@@ -416,6 +483,13 @@ pub fn main() !void {
         try stderr.print("PCI address is required.\n", .{});
         return error.InvalidArgument;
     };
+
+    // TODO: readlink -f /sys/bus/pci/devices/<pci_addr>/iommu_group  相当を行ってgroup_numを取得できるはず
+    const group_num = res.positionals[1] orelse {
+        try stderr.print("IOMMU group number is required.\n", .{});
+        return error.InvalidArgument;
+    };
+
     var config = NvmDeviceConfig.default();
     if (res.args.timeout) |timeout| {
         if (timeout < 1) {
@@ -425,7 +499,7 @@ pub fn main() !void {
         config.timeout_sec = timeout;
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
     }
-    const device = try NvmDevice.open(pci_addr, &config);
+    const device = try NvmDevice.open(pci_addr, group_num, &config);
     defer device.close();
     const status = device.status();
     if (verbose) {

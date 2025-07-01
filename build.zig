@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
         .root_module = exe_mod,
     });
     // if you want to link against a C library, you can do so like this:
-    // exe.linkLibC();
+    exe.linkLibC(); // for linux/vfio.h
 
     const clap = b.dependency("clap", .{});
     exe.root_module.addImport("clap", clap.module("clap"));
