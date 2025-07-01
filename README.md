@@ -47,6 +47,16 @@ cat /proc/cmdline
 sudo dmesg | grep -e DMAR -e IOMMU
 ```
 
+```bash
+user in 🌐 nbg9 in znvme on  develop [$✘?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
+❯ sudo dmesg | grep -e DMAR -e IOMMU
+(snip)
+[    0.005995] ACPI: DMAR 0x00000000725CE000 000088 (v02 INTEL  EDK2     00000002      01000013)
+[    0.006037] ACPI: Reserving DMAR table memory at [mem 0xXXXXXXXX-0xXXXXXXXX]
+[    0.027230] DMAR: IOMMU enabled
+[    0.079635] DMAR: Host address width 39
+```
+
 #### For Intel CPUs
 
 Add `intel_iommu=on` to the kernel command line in your bootloader configuration (e.g., GRUB):
@@ -64,6 +74,8 @@ Then update GRUB
 ```bash
 sudo update-grub
 ```
+
+
 
 ## VFIO Setup
 
