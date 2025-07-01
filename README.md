@@ -38,11 +38,38 @@ TODO
 
 TODO
 
-### Driver Setup
+## IOMMU Setup
 
-To use this driver, you need to switch your NVMe device from the default kernel `nvme` driver to the `uio_pci_generic` driver, which allows user space programs to access device registers directly.
+Ensure the kernel command line includes `intel_iommu=on` or `amd_iommu=on` depending on your CPU architecture.
 
-Scripts for switching drivers are provided in the `misc/` directory.
+```bash
+cat /proc/cmdline
+sudo dmesg | grep -e DMAR -e IOMMU
+```
+
+#### For Intel CPUs
+
+Add `intel_iommu=on` to the kernel command line in your bootloader configuration (e.g., GRUB):
+
+```bash
+sudo vim /etc/default/grub
+```
+
+```text
+GRUB_CMDLINE_LINUX_DEFAULT="quiet splash intel_iommu=on"
+```
+
+Then update GRUB
+
+```bash
+sudo update-grub
+```
+
+## VFIO Setup
+
+To access NVMe devices from user space, you need to switch the kernel driver from `nvme` to `vfio-pci`.
+
+Driver switching scripts are available in the `misc/` directory.
 
 #### Listing NVMe devices
 
@@ -50,7 +77,7 @@ First, check the NVMe devices connected to your system.
 The following command lists devices currently bound to the `nvme` driver:
 
 ```bash
-user in 🌐 nbg9 in toynvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
+user in 🌐 nbg9 in znvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
 ❯ sudo ./misc/list.sh
 # Listing NVMe devices
 Node                  Generic               SN                   Model                                    Namespace  Usage                      Format           FW Rev  
@@ -68,50 +95,37 @@ PCI Address: 07:00.0, VID: 1e4b, PID: 1202, Info: MAXIO Technology (Hangzhou) Lt
 You can also check each device's PCI address, vendor ID, and product ID.  
 This information is required for driver switching.
 
-#### Binding to the uio_pci_generic driver
+#### Binding to the vfio-pci driver
 
-Unbind the NVMe device from the `nvme` driver and bind it to the `uio_pci_generic` driver.  
+Unbind the NVMe device from the `nvme` driver and bind it to the `vfio-pci` driver.  
 Example for switching the device at PCI address `0000:06:00.0`:
 
 ```bash
-user in 🌐 nbg9 in toynvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
-❯ sudo ./misc/bind_uio.sh 0000:06:00.0 1e0f 000d
+user in 🌐 nbg9 in znvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
+❯ sudo ./misc/bind_vfio.sh 0000:06:00.0 1e0f 000d
 Unbound 0000:06:00.0 from nvme driver.
-grep: /sys/bus/pci/drivers/uio_pci_generic/new_id: Permission denied
-Bound 0000:06:00.0 to uio_pci_generic driver.
-Bound 0000:06:00.0 to uio_pci_generic driver.
-Successfully bound 0000:06:00.0 to uio_pci_generic driver.
+grep: /sys/bus/pci/drivers/vfio-pci/new_id: Permission denied
+Bound 0000:06:00.0 to vfio-pci driver.
+Bound 0000:06:00.0 to vfio-pci driver.
+Successfully bound 0000:06:00.0 to vfio-pci driver.
 06:00.0 Non-Volatile memory controller: KIOXIA Corporation NVMe SSD Controller XG7
         Subsystem: KIOXIA Corporation NVMe SSD Controller XG7
-        Kernel driver in use: uio_pci_generic
+        Kernel driver in use: vfio-pci
         Kernel modules: nvme
 ```
 
-If you see `Permission denied` for `/sys/bus/pci/drivers/uio_pci_generic/new_id`, make sure you are running as root.  
-After binding, confirm `Kernel driver in use: uio_pci_generic`.
+If you see `Permission denied` for `/sys/bus/pci/drivers/vfio-pci/new_id`, make sure you are running as root.  
+After binding, confirm `Kernel driver in use: vfio-pci`.
 
-##### Checking the unbound device
 
-Devices bound to `uio_pci_generic` will not appear in tools like `nvme`.  
-Example after switching:
-
-```bash
-user in 🌐 nbg9 in toynvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
-❯ sudo nvme list
-Node                  Generic               SN                   Model                                    Namespace  Usage                      Format           FW Rev  
---------------------- --------------------- -------------------- ---------------------------------------- ---------- -------------------------- ---------------- --------
-/dev/nvme1n1          /dev/ng1n1            201008800819         WDC WD BLACK SDBPNTY-512G-1106           0x1        512.11  GB / 512.11  GB    512   B +  0 B   HPS2    
-/dev/nvme2n1          /dev/ng2n1            TTSMA2513X09608      TWSC TSC3AN512-F8T40S                    0x1        512.11  GB / 512.11  GB    512   B +  0 B   SN13126 
-```
-
-#### Unbinding from the uio_pci_generic driver and rebinding to the nvme driver
+#### Unbinding from the vfio-pci driver and rebinding to the nvme driver
 
 After your work, you can return the device to the original `nvme` driver:
 
 ```bash
-user in 🌐 nbg9 in toynvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
-❯ sudo ./misc/unbind_uio.sh 0000:06:00.0
-Unbound 0000:06:00.0 from uio_pci_generic driver.
+user in 🌐 nbg9 in znvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
+❯ sudo ./misc/unbind_vfio.sh 0000:06:00.0
+Unbound 0000:06:00.0 from vfio-pci driver.
 Bound 0000:06:00.0 to nvme driver.
 Successfully bound 0000:06:00.0 to nvme driver.
 06:00.0 Non-Volatile memory controller: KIOXIA Corporation NVMe SSD Controller XG7
@@ -120,23 +134,11 @@ Successfully bound 0000:06:00.0 to nvme driver.
         Kernel modules: nvme
 ```
 
-##### Listing NVMe devices again
-
-Once rebound to the `nvme` driver, the device will reappear in `nvme list`:
-
-```bash
-user in 🌐 nbg9 in toynvme on  master [!?] via ↯ v0.14.1 via ❄️  impure (nix-shell-env) 
-❯ sudo nvme list
-Node                  Generic               SN                   Model                                    Namespace  Usage                      Format           FW Rev  
---------------------- --------------------- -------------------- ---------------------------------------- ---------- -------------------------- ---------------- --------
-/dev/nvme0n1          /dev/ng0n1            Z4HF716NF88S         KIOXIA-EXCERIA with Heatsink SSD         0x1          1.02  TB /   1.02  TB    512   B +  0 B   AJRA4101
-/dev/nvme1n1          /dev/ng1n1            201008800819         WDC WD BLACK SDBPNTY-512G-1106           0x1        512.11  GB / 512.11  GB    512   B +  0 B   HPS2    
-/dev/nvme2n1          /dev/ng2n1            TTSMA2513X09608      TWSC TSC3AN512-F8T40S                    0x1        512.11  GB / 512.11  GB    512   B +  0 B   SN13126 
-```
-
 ## References
 
 - [NVMe Specification](https://nvmexpress.org/specifications/)
+  - [NVM Express Base Specification Revision 2.1](https://nvmexpress.org/wp-content/uploads/NVM-Express-Base-Specification-Revision-2.1-2024.08.05-Ratified.pdf)
+  - [NVM Express PCI Express Transport Specification Revision 1.1](https://nvmexpress.org/wp-content/uploads/NVM-Express-PCI-Express-Transport-Specification-Revision-1.1-2024.08.05-Ratified.pdf)
 
 
 ## License

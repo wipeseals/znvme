@@ -7,7 +7,9 @@
       "name": "Debug znvme",
       "program": "${workspaceFolder}/zig-out/bin/znvme",
       "args": [
-        "${input:pciAddress}"
+        "--",
+        "${input:pciAddress}",
+        "${input:iommu_groupid}"
       ],
       "preLaunchTask": "zig build",
       "cwd": "${workspaceFolder}",
@@ -19,6 +21,11 @@
       "id": "pciAddress",
       "type": "promptString",
       "description": "Enter PCI device address (e.g. 0000:01:00.0)"
+    },
+    {
+      "id": "iommu_groupid",
+      "type": "promptString",
+      "description": "Enter IOMMU group ID (e.g. 0)",
     }
   ]
 }
