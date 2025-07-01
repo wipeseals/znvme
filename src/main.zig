@@ -254,7 +254,7 @@ const NvmDevice = struct {
         return ret;
     }
     pub fn timeoutSec(self: *const NvmDevice) u32 {
-        if (self.config.prefer_cap_to & self.ctrl_reg.cap.to != 0) {
+        if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
             return self.ctrl_reg.cap.to;
         } else {
             return self.config.timeout_sec;
