@@ -119,6 +119,8 @@ const NvmDevice = struct {
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
+        const stderr = std.io.getStdErr().writer();
+
         // --- VFIO経由でデバイスをopen・BAR0マップ ---
         var vfio_container_fd: std.posix.fd_t = -1;
         var vfio_group_fd: std.posix.fd_t = -1;
@@ -143,14 +145,20 @@ const NvmDevice = struct {
 
         // 3. VFIO ioctlシーケンス
         var group_status: c.struct_vfio_group_status = .{ .argsz = @sizeOf(c.struct_vfio_group_status) };
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status) != 0 or group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status) < 0 or group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_GROUP_GET_STATUS failed: {}\n", .{errno});
             return error.VfioGroupNotViable;
         }
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd) != 0) {
+        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd) < 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: {}\n", .{errno});
             return error.VfioSetContainerFailed;
         }
         var iommu_type: c_int = c.VFIO_TYPE1_IOMMU;
-        if (c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type) != 0) {
+        if (c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type) < 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_SET_IOMMU failed: {}\n", .{errno});
             return error.VfioSetIommuFailed;
         }
         var pci_addr_cstr: [32]u8 = undefined;
@@ -476,13 +484,13 @@ pub fn main() !void {
     defer res.deinit();
 
     if (res.args.help != 0)
-        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+        return clap.help(stderr, clap.Help, &params, .{}); // 共通化
 
     const verbose = res.args.verbose != 0;
 
     const pci_addr: []const u8 = res.positionals[0] orelse {
         try stderr.print("PCI address is required.\n", .{});
-        return clap.help(std.io.getStdErr().writer(), clap.Help, &params, .{});
+        return clap.help(stderr, clap.Help, &params, .{}); // 共通化
     };
 
     // TODO: readlink -f /sys/bus/pci/devices/<pci_addr>/iommu_group  相当を行ってgroup_numを取得できるはず
