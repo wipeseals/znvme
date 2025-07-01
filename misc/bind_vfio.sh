@@ -43,7 +43,7 @@ if [ -L "$GROUP_PATH" ]; then
   GROUP_NUM=$(basename "$(readlink -f "$GROUP_PATH")")
   echo "IOMMU group: $GROUP_NUM"
   VFIO_DEV="/dev/vfio/$GROUP_NUM"
-  sudo chmod 660 "$VFIO_DEV"
+  sudo chmod 666 "$VFIO_DEV"
 else
   echo "IOMMU group not found for $PCI_ADDR"
 fi
