@@ -135,32 +135,31 @@ const NvmDevice = struct {
             if (vfio_container_fd != -1) std.posix.close(vfio_container_fd);
         }
 
-        // 1. /dev/vfio/vfio をopen (コンテナFD)
+        // 1. /dev/vfio/vfio をopen -> container FD
         vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
 
-        // 2. /dev/vfio/<group> をopen
+        // 2. /dev/vfio/<group> をopen -> group FD
         const vfio_group_path = try std.fmt.allocPrint(std.heap.page_allocator, "/dev/vfio/{d}", .{group_num});
         defer std.heap.page_allocator.free(vfio_group_path);
         vfio_group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
 
-        // 3. VFIO ioctlシーケンス
-        var group_status: c.struct_vfio_group_status = .{ .argsz = @sizeOf(c.struct_vfio_group_status) };
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status) < 0 or group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+        // 3. VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
+        const ret3 = c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd);
+        if (ret3 < 0) {
             const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_GET_STATUS failed: {}\n", .{errno});
-            return error.VfioGroupNotViable;
-        }
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd) < 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: {}\n", .{errno});
+            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: ret:{} errno: {}\n", .{ ret3, errno });
             return error.VfioSetContainerFailed;
         }
+        // 4. VFOPIO_SET_IOMMU でIOMMUタイプを設定
         var iommu_type: c_int = c.VFIO_TYPE1_IOMMU;
-        if (c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type) < 0) {
+
+        const ret4 = c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type);
+        if (ret4 < 0) {
             const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_SET_IOMMU failed: {}\n", .{errno});
+            try stderr.print("VFIO_SET_IOMMU failed: ret:{} errno: {}\n", .{ ret4, errno });
             return error.VfioSetIommuFailed;
         }
+
         var pci_addr_cstr: [32]u8 = undefined;
         @memcpy(pci_addr_cstr[0..pci_addr.len], pci_addr);
         pci_addr_cstr[pci_addr.len] = 0;
