@@ -121,13 +121,11 @@ const NvmDevice = struct {
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
         const stderr = std.io.getStdErr().writer();
 
-        // --- VFIO経由でデバイスをopen・BAR0マップ ---
         var vfio_container_fd: std.posix.fd_t = -1;
         var vfio_group_fd: std.posix.fd_t = -1;
         var vfio_device_fd: std.posix.fd_t = -1;
         var bar0_map: []align(page_size_min) u8 = &[_]u8{};
 
-        // errdeferを使ったクリーンアップ
         errdefer {
             if (bar0_map.len > 0) std.posix.munmap(bar0_map);
             if (vfio_device_fd != -1) std.posix.close(vfio_device_fd);
@@ -135,47 +133,76 @@ const NvmDevice = struct {
             if (vfio_container_fd != -1) std.posix.close(vfio_container_fd);
         }
 
-        // 1. /dev/vfio/vfio をopen (コンテナFD)
-        vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
+        ////////////////////////////////////////////////////////////////
+        // vfio経由でのアクセスセットアップ
 
-        // 2. /dev/vfio/<group> をopen
+        // /dev/vfio/<group> をopen -> group FD
         const vfio_group_path = try std.fmt.allocPrint(std.heap.page_allocator, "/dev/vfio/{d}", .{group_num});
         defer std.heap.page_allocator.free(vfio_group_path);
         vfio_group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
 
-        // 3. VFIO ioctlシーケンス
-        var group_status: c.struct_vfio_group_status = .{ .argsz = @sizeOf(c.struct_vfio_group_status) };
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status) < 0 or group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+        // グループの状態を確認する（この呼び出し自体が重要）
+        var group_status: c.struct_vfio_group_status = undefined;
+        group_status.argsz = @sizeOf(@TypeOf(group_status));
+        const group_status_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status);
+        if (group_status_ret < 0) {
             const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_GET_STATUS failed: {}\n", .{errno});
+            try stderr.print("VFIO_GROUP_GET_STATUS failed: ret:{} errno:{}\n", .{ group_status_ret, errno });
+            return error.VfioGetGroupStatusFailed;
+        }
+        // グループがViableでない（例えば一部デバイスがホストドライバを使用中など）
+        if (group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
+            try stderr.print("VFIO group is not viable\n", .{});
             return error.VfioGroupNotViable;
         }
-        if (c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd) < 0) {
+        // /dev/vfio/vfio をopen -> container FD
+        vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
+        // APIバージョンを確認
+        const api_ver_ret = c.ioctl(vfio_container_fd, c.VFIO_GET_API_VERSION);
+        if (api_ver_ret != c.VFIO_API_VERSION) {
             const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: {}\n", .{errno});
+            try stderr.print("VFIO_GET_API_VERSION failed: ret:{} errno:{}\n", .{ api_ver_ret, errno });
+            return error.VfioUnknownApiVersion;
+        }
+        // VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
+        const group_set_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd);
+        if (group_set_ret < 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: ret:{} errno: {}\n", .{ group_set_ret, errno });
             return error.VfioSetContainerFailed;
         }
-        var iommu_type: c_int = c.VFIO_TYPE1_IOMMU;
-        if (c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, &iommu_type) < 0) {
+        // VFIO_SET_IOMMU でIOMMUタイプを設定
+        const set_iommu_ret = c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, c.VFIO_TYPE1_IOMMU);
+        if (set_iommu_ret < 0) {
             const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_SET_IOMMU failed: {}\n", .{errno});
+            try stderr.print("VFIO_SET_IOMMU failed: ret:{} errno: {}\n", .{ set_iommu_ret, errno });
             return error.VfioSetIommuFailed;
         }
+
+        // デバイスのFDを取得
         var pci_addr_cstr: [32]u8 = undefined;
         @memcpy(pci_addr_cstr[0..pci_addr.len], pci_addr);
         pci_addr_cstr[pci_addr.len] = 0;
         const fd_result = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_DEVICE_FD, &pci_addr_cstr);
-        if (fd_result < 0) return error.VfioGetDeviceFdFailed;
+        if (fd_result < 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_GROUP_GET_DEVICE_FD failed: ret:{} errno:{}\n", .{ fd_result, errno });
+            return error.VfioGetDeviceFdFailed;
+        }
         vfio_device_fd = @intCast(fd_result);
-
-        // 4. BAR0情報取得
+        // VFIO_PCI_BAR0_REGION_INDEX でBAR0空間の情報を取得
         var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
         region_info.index = c.VFIO_PCI_BAR0_REGION_INDEX;
-        if (c.ioctl(vfio_device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &region_info) != 0) {
+        const get_region_ret = c.ioctl(vfio_device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &region_info);
+        if (get_region_ret != 0) {
+            const errno = std.posix.errno(-1);
+            try stderr.print("VFIO_DEVICE_GET_REGION_INFO failed: ret:{} errno:{}\n", .{ get_region_ret, errno });
+            // エラー処理
             return error.VfioGetRegionInfoFailed;
         }
-
-        // 5. BAR0をmmap
+        //////////////////////////////////////////////////////////////////
+        // vfio_device_fd と region_info を使ってBAR0空間にアクセス
+        // BAR0をmmap
         bar0_map = try std.posix.mmap(
             null,
             region_info.size,
@@ -184,7 +211,6 @@ const NvmDevice = struct {
             vfio_device_fd,
             region_info.offset,
         );
-
         const ctrl_reg: *volatile ControllerRegister = @ptrCast(bar0_map.ptr);
         if (!ctrl_reg.isValid()) {
             return error.InvalidControllerRegister;
