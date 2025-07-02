@@ -5,6 +5,8 @@ IOMMU_KEYWORDS=("intel_iommu=on" "amd_iommu=on" "iommu=on")
 
 echo "Checking IOMMU status..."
 
+FOUND=0
+
 # カーネルコマンドラインの確認
 CMDLINE=$(cat /proc/cmdline)
 for key in "${IOMMU_KEYWORDS[@]}"; do
