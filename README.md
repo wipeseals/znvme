@@ -40,12 +40,21 @@ For physical NVMe devices, follow the IOMMU and VFIO setup instructions below.
 For development and testing without physical hardware:
 
 ```bash
-# Start QEMU with virtual NVMe device
+# Install QEMU and dependencies
 cd qemu
-./start-qemu.sh
+./qemu-manager.sh setup
+
+# Start QEMU with virtual NVMe device
+./qemu-manager.sh start
 
 # In another terminal, run tests
-./run-tests.sh
+./qemu-manager.sh test
+
+# Check environment status
+./qemu-manager.sh status
+
+# Debug with GDB
+./qemu-manager.sh debug
 ```
 
 See [QEMU Test Environment Guide](docs/QEMU.md) for detailed instructions.
