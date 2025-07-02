@@ -10,6 +10,99 @@ The QEMU test environment provides:
 - Automated CI/CD testing in GitHub Actions
 - Isolation from host system during development
 
+## Working Examples
+
+### Environment Status Check
+
+After setup, verify the environment status:
+
+```bash
+$ ./qemu-manager.sh status
+[INFO] QEMU Environment Status:
+
+[SUCCESS] QEMU is installed: QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.7)
+[SUCCESS] GDB is installed: GNU gdb (Ubuntu 15.0.50.20240403-0ubuntu1) 15.0.50.20240403-git
+[INFO] QEMU is not running
+
+[INFO] Virtual disk images:
+  virtual-nvme.img: 4.0K
+  guest-disk.qcow2: 196K
+
+[INFO] Network ports:
+[INFO] SSH port 2222 is not listening
+[INFO] Serial console port 4321 is not listening
+```
+
+### Running Environment Tests
+
+Validate all components with comprehensive testing:
+
+```bash
+$ ./qemu-manager.sh test
+=== znvme QEMU Environment Test ===
+Running 8 test categories...
+
+[1/8] Running test_qemu_available...
+  ✓ QEMU found: QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.7)
+  Result: PASS
+
+[7/8] Running test_qemu_command_generation...
+  ✓ start-qemu.sh can be invoked
+  ✓ Virtual NVMe image exists: virtual-nvme.img
+  Result: PASS
+
+=== Test Summary ===
+Total tests: 8
+Passed: 7
+Failed: 1
+```
+
+**Note:** The KVM permission failure is expected in CI environments. QEMU automatically falls back to TCG emulation.
+
+### Starting QEMU (Framework Testing)
+
+For testing the QEMU framework without a guest OS:
+
+```bash
+$ env QEMU_KERNEL="" QEMU_INITRD="" ./start-qemu.sh
+Warning: KVM exists but not accessible, falling back to TCG emulation
+Starting QEMU with virtual NVMe device...
+Acceleration: tcg
+
+Virtual NVMe device: virtual-nvme.img (1G)
+VNC display: localhost:5901
+Serial console: telnet localhost 4321
+SSH port forwarding: localhost:2222 -> guest:22
+
+QEMU 8.2.2 monitor - type 'help' for more information
+(qemu) 
+```
+
+### QEMU Monitor Commands
+
+Inspect the virtual hardware using monitor commands:
+
+```bash
+(qemu) info block
+hd0 (#block050): guest-disk.qcow2 (qcow2)
+    Attached to:      /machine/peripheral-anon/device[1]
+    Cache mode:       writeback
+
+nvme0 (#block169): virtual-nvme.img (raw)
+    Attached to:      /machine/peripheral-anon/device[2]
+    Cache mode:       writeback
+
+(qemu) info pci
+  Bus  0, device   4, function 0:
+    Non-volatile memory controller: PCI device 1b36:0010
+      PCI subsystem 1af4:1100
+      IRQ 11.
+      BAR0: 64 bit memory at 0xfebf3000 [0xfebf3fff].
+      id ""
+```
+
+This shows the virtual NVMe controller successfully created at PCI address 00:04.0.
+
 ## Quick Start
 
 ### Prerequisites
@@ -58,15 +151,35 @@ The `start-qemu.sh` script creates a QEMU environment with:
 - **Display**: VNC on port 5901
 - **Serial console**: Telnet on port 4321
 
-### Environment Variables
+## Environment Variables
 
 Customize the QEMU environment:
 ```bash
-export QEMU_MEMORY=4G          # Memory size
-export QEMU_CPUS=4             # Number of CPUs
-export QEMU_NVME_SIZE=2G       # Virtual NVMe device size
+# Memory and CPU configuration
+export QEMU_MEMORY=4G          # Memory size (default: 2G)
+export QEMU_CPUS=4             # Number of CPUs (default: 2)
+
+# Virtual NVMe device configuration
+export QEMU_NVME_SIZE=2G       # Virtual NVMe device size (default: 1G)
+
+# Acceleration and debugging options
+export QEMU_NO_KVM=true        # Disable KVM explicitly (useful for CI)
 export QEMU_DEBUG=true         # Enable GDB debugging
-export QEMU_VNC=:2             # VNC display port
+export QEMU_VNC=:2             # VNC display port (default: :1)
+
+# Advanced options for framework testing
+export QEMU_KERNEL=""          # Skip kernel loading
+export QEMU_INITRD=""          # Skip initrd loading
+```
+
+**CI Environment Example:**
+```bash
+# Recommended settings for CI/CD pipelines
+export QEMU_NO_KVM=true
+export QEMU_MEMORY=2G
+export QEMU_CPUS=2
+export QEMU_KERNEL=""
+export QEMU_INITRD=""
 ```
 
 ### Guest OS Setup
@@ -86,14 +199,29 @@ sudo /path/to/setup-guest.sh
 
 ## Development Workflow
 
-### Testing Cycle
+### Framework Testing (No Guest OS Required)
 
-1. **Modify znvme code**
-2. **Build**: `zig build`
-3. **Deploy to guest**: Copy binary via SSH/SCP
-4. **Test**: Run znvme against virtual NVMe device
-5. **Debug**: Use GDB if needed
-6. **Iterate**
+Test the QEMU environment framework:
+
+```bash
+# Start QEMU with virtual NVMe device for framework validation
+env QEMU_KERNEL="" QEMU_INITRD="" ./start-qemu.sh
+
+# In the QEMU monitor, verify virtual hardware:
+(qemu) info block    # Shows virtual-nvme.img attached
+(qemu) info pci      # Shows NVMe controller at 00:04.0
+(qemu) quit          # Shutdown QEMU
+```
+
+### Full Development Cycle (With Guest OS)
+
+1. **Prepare guest OS**: Install Linux with NVMe and VFIO support
+2. **Modify znvme code**
+3. **Build**: `zig build`
+4. **Deploy to guest**: Copy binary via SSH/SCP
+5. **Test**: Run znvme against virtual NVMe device
+6. **Debug**: Use GDB if needed
+7. **Iterate**
 
 ### Device Management
 
@@ -171,11 +299,18 @@ Useful monitor commands:
 
 ### GitHub Actions
 
-The workflow runs automatically on push/PR:
-- Builds znvme with Zig
-- Starts QEMU environment
-- Runs test suite
-- Uploads test results as artifacts
+The workflow runs automatically and includes QEMU testing:
+- ✅ Builds znvme with Zig
+- ✅ Installs QEMU and dependencies
+- ✅ Validates QEMU environment setup
+- ✅ Creates virtual NVMe devices
+- ✅ Tests framework functionality
+- ✅ Uploads test results as artifacts
+
+**Test Results:**
+- Total tests: 8
+- Passed: 7 (87.5%)
+- Failed: 1 (KVM permissions - expected in CI)
 
 ### Local CI Testing
 
@@ -185,7 +320,7 @@ cd qemu
 ./ci-test.sh
 ```
 
-Test results are saved in `test-results/` directory.
+**Note:** The CI framework is designed to work in environments without KVM access, automatically falling back to TCG emulation for broader compatibility.
 
 ## Advanced Usage
 
