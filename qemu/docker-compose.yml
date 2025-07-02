@@ -1,0 +1,64 @@
+services:
+  znvme-qemu:
+    build:
+      context: ..
+      dockerfile: qemu/Dockerfile
+    container_name: znvme-qemu-dev
+    # Privileged mode needed for KVM access
+    privileged: true
+    # Mount KVM device if available
+    devices:
+      - /dev/kvm:/dev/kvm
+    ports:
+      # SSH forwarding to QEMU guest
+      - "2222:2222"
+      # VNC display
+      - "5901:5901" 
+      # QEMU monitor/serial console
+      - "4321:4321"
+    volumes:
+      # Mount source code for development
+      - ../:/workspace/znvme:rw
+      # Persistent storage for QEMU disk images and data
+      - qemu-data:/workspace/qemu-data:rw
+      # Optional: mount X11 socket for GUI applications
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    environment:
+      # QEMU configuration
+      - QEMU_MEMORY=4G
+      - QEMU_CPUS=4
+      - QEMU_VNC=:1
+      - QEMU_DEBUG=false
+      # For X11 forwarding (optional)
+      - DISPLAY=${DISPLAY:-:0}
+      # Disable KVM if not available
+      - QEMU_NO_KVM=false
+    working_dir: /workspace/znvme/qemu
+    # Keep container running for interactive use
+    tty: true
+    stdin_open: true
+    # Override default command for interactive shell
+    command: /bin/bash
+
+  # Alternative service for CI/automated testing
+  znvme-qemu-ci:
+    build:
+      context: ..
+      dockerfile: qemu/Dockerfile
+    container_name: znvme-qemu-ci
+    # For CI, we might not have KVM access
+    environment:
+      - QEMU_NO_KVM=true
+      - QEMU_MEMORY=2G
+      - QEMU_CPUS=2
+    volumes:
+      - ../:/workspace/znvme:ro
+    working_dir: /workspace/znvme/qemu
+    # Run tests and exit
+    command: ["./qemu-manager.sh", "test"]
+    profiles:
+      - ci
+
+volumes:
+  qemu-data:
+    driver: local

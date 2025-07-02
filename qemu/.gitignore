@@ -19,3 +19,7 @@ gdb_*.txt
 *.key
 *.pub
 known_hosts
+
+# Docker generated files
+.docker/
+docker-volumes/
