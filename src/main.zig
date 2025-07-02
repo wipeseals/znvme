@@ -155,29 +155,29 @@ const NvmDevice = struct {
             try stderr.print("VFIO group is not viable\n", .{});
             return error.VfioGroupNotViable;
         }
-        // 1. /dev/vfio/vfio をopen -> container FD
+        // /dev/vfio/vfio をopen -> container FD
         vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
 
-        // 2. APIバージョンを確認
+        // APIバージョンを確認
         if (c.ioctl(vfio_container_fd, c.VFIO_GET_API_VERSION) != c.VFIO_API_VERSION) {
             try stderr.print("Unknown VFIO API version\n", .{});
             return error.VfioUnknownApiVersion;
         }
 
-        // 3. IOMMU Type 1 が利用可能か確認する (利用可能時に1)
+        // IOMMU Type 1 が利用可能か確認する (利用可能時に1)
         if (c.ioctl(vfio_container_fd, c.VFIO_CHECK_EXTENSION, c.VFIO_TYPE1_IOMMU) != 1) {
             try stderr.print("VFIO_TYPE1_IOMMU is not available\n", .{});
             return error.VfioIommuTypeNotSupported;
         }
 
-        // 5. VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
+        // VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
         const ret3 = c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd);
         if (ret3 < 0) {
             const errno = std.posix.errno(-1);
             try stderr.print("VFIO_GROUP_SET_CONTAINER failed: ret:{} errno: {}\n", .{ ret3, errno });
             return error.VfioSetContainerFailed;
         }
-        // 6. VFIO_SET_IOMMU でIOMMUタイプを設定
+        // VFIO_SET_IOMMU でIOMMUタイプを設定
         const ret4 = c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, c.VFIO_TYPE1_IOMMU);
         if (ret4 < 0) {
             const errno = std.posix.errno(-1);
@@ -185,7 +185,7 @@ const NvmDevice = struct {
             return error.VfioSetIommuFailed;
         }
 
-        // 7. デバイスのFDを取得
+        // デバイスのFDを取得
         var pci_addr_cstr: [32]u8 = undefined;
         @memcpy(pci_addr_cstr[0..pci_addr.len], pci_addr);
         pci_addr_cstr[pci_addr.len] = 0;
@@ -193,14 +193,14 @@ const NvmDevice = struct {
         if (fd_result < 0) return error.VfioGetDeviceFdFailed;
         vfio_device_fd = @intCast(fd_result);
 
-        // 8. BAR0情報取得
+        // BAR0情報取得
         var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
         region_info.index = c.VFIO_PCI_BAR0_REGION_INDEX;
         if (c.ioctl(vfio_device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &region_info) != 0) {
             return error.VfioGetRegionInfoFailed;
         }
 
-        // 9. BAR0をmmap
+        // BAR0をmmap
         bar0_map = try std.posix.mmap(
             null,
             region_info.size,
