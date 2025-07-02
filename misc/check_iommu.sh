@@ -23,7 +23,7 @@ if dmesg | grep -qi 'IOMMU.*enabled'; then
     FOUND=1
 fi
 
-if [[ -z "$FOUND" ]]; then
+if [[ $FOUND -eq 0 ]]; then
     echo "IOMMU does NOT appear to be enabled."
     exit 1
 else
