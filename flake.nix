@@ -14,6 +14,8 @@
             packages = with pkgs; [
                 zig
                 nvme-cli
+                qemu
+                gdb
             ];
         };
     };
