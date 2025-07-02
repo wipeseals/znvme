@@ -1,0 +1,21 @@
+# QEMU generated files
+*.img
+*.qcow2
+*.iso
+*.log
+test-results/
+/tmp/
+
+# Guest disk images
+guest-disk.*
+virtual-nvme.*
+
+# Debug files
+core.*
+gdb_*.txt
+*.dump
+
+# SSH keys
+*.key
+*.pub
+known_hosts

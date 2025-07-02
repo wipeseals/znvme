@@ -1,3 +1,9 @@
 .direnv
 .zig-cache
 zig-out
+
+# QEMU test environment
+qemu/*.img
+qemu/*.qcow2
+qemu/*.log
+qemu/test-results/

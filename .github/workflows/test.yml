@@ -8,6 +8,7 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Standard Zig tests
   test:
     runs-on: ubuntu-latest
     steps:
@@ -18,3 +19,29 @@ jobs:
           version: master
       - name: Run zig build test
         run: zig build test
+  
+  # QEMU environment tests
+  qemu-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: master
+      - name: Install QEMU and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-x86 qemu-utils gdb
+      - name: Build znvme
+        run: zig build
+      - name: Run QEMU CI tests
+        run: |
+          cd qemu
+          ./ci-test.sh
+      - name: Upload test results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: qemu-test-results
+          path: qemu/test-results/

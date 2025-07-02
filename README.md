@@ -29,14 +29,57 @@ zig build test
 
 ## Usage
 
+znvme can be tested both on physical hardware and in a QEMU virtual environment.
+
+### Physical Hardware
+
+For physical NVMe devices, follow the IOMMU and VFIO setup instructions below.
+
+### QEMU Virtual Environment
+
+For development and testing without physical hardware:
+
+```bash
+# Start QEMU with virtual NVMe device
+cd qemu
+./start-qemu.sh
+
+# In another terminal, run tests
+./run-tests.sh
+```
+
+See [QEMU Test Environment Guide](docs/QEMU.md) for detailed instructions.
 
 ### Basic Example
 
-TODO
+```bash
+# List available NVMe devices
+sudo ./misc/list.sh
+
+# Bind device to VFIO (example PCI address and IDs)
+sudo ./misc/bind_vfio.sh 0000:06:00.0 1e0f 000d
+
+# Run znvme (PCI address and IOMMU group number)
+./zig-out/bin/znvme 0000:06:00.0 14
+
+# Unbind when done
+sudo ./misc/unbind_vfio.sh 0000:06:00.0
+```
 
 ### Advanced Example
 
-TODO
+For debugging and development:
+
+```bash
+# Start QEMU with debugging enabled
+cd qemu
+QEMU_DEBUG=true ./start-qemu.sh
+
+# In another terminal, connect GDB
+./debug-gdb.sh
+
+# Set breakpoints and debug znvme
+```
 
 ## IOMMU Setup
 
