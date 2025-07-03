@@ -102,8 +102,8 @@ const NvmDeviceConfig = struct {
     timeout_sec: u32 = 10,
     /// Prefer the CAP.TO setting
     prefer_cap_to: bool = true,
-    /// Admin queue depth, minimum is 2
-    admin_queue_depth: u12 = 2,
+    /// Admin queue depth, minimum is 1 (規格上+1が必要だが、0'base registerなのでそのままセット)
+    admin_queue_depth: u12 = 1,
     /// Base address for I/O Virtual Address (IOVA) for admin submission queue
     iova_asq_base: u64 = 0x10000000,
     /// Base address for I/O Virtual Address (IOVA) for admin completion queue
@@ -119,7 +119,7 @@ const NvmDeviceConfig = struct {
         return NvmDeviceConfig{
             .timeout_sec = 10,
             .prefer_cap_to = true,
-            .admin_queue_depth = 2,
+            .admin_queue_depth = 1,
             .iova_asq_base = 0x10000000,
             .iova_sq_base = 0x20000000,
             .iova_data_base = 0x30000000,
@@ -642,20 +642,6 @@ pub fn main() !void {
     }
     var device = try NvmDevice.open(pci_addr, group_num, &config);
     defer device.close();
-    const init_status = device.status();
-    if (verbose) {
-        const version = try device.ctrl_reg.nvmVersionStr(allocator);
-        defer allocator.free(version);
-        try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
-            pci_addr,
-            version,
-            init_status,
-        });
-        try stdout.print("Controller Register Raw:", .{});
-        try device.printRaw(stdout);
-
-        try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
-    }
     device.resetController() catch |err| {
         if (err == error.Timeout) {
             try stderr.print("Controller reset timed out after {} seconds.\n", .{config.timeout_sec});
@@ -672,5 +658,16 @@ pub fn main() !void {
     if (verbose) {
         try stdout.print("Controller reset completed. Current status: {}\n", .{enabled_status});
         try stdout.print("Controller is enabled and ready.\n", .{});
+        const version = try device.ctrl_reg.nvmVersionStr(allocator);
+        defer allocator.free(version);
+        try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
+            pci_addr,
+            version,
+            enabled_status,
+        });
+        try stdout.print("Controller Register Raw:", .{});
+        try device.printRaw(stdout);
+
+        try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
 }
