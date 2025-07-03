@@ -5,6 +5,7 @@ const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
+const vfio = @import("vfio.zig");
 const util = @import("util.zig");
 
 // VFIO用Cヘッダのインクルード
@@ -135,170 +136,44 @@ const NvmDevice = struct {
     pci_addr: []const u8,
     /// Configuration for the NVM device
     config: NvmDeviceConfig,
-    /// File descriptors for VFIO container, group, and device
-    vfio_container_fd: std.posix.fd_t,
-    /// VFIO group file descriptor
-    vfio_group_fd: std.posix.fd_t,
-    /// VFIO device file descriptor
-    vfio_device_fd: std.posix.fd_t,
-    /// Memory-mapped region for the controller registers (BAR0)
-    ctrl_reg_map: []align(page_size_min) u8,
     /// Pointer to the controller registers
     ctrl_reg: *volatile ControllerRegister,
+    /// VFIO Container
+    vfio_container: vfio.Container,
     /// Admin Submission Queueの本体
-    asq_body: ?[]u8 = null,
+    asq_body: ?vfio.Map = null,
     /// Admin Completion Queueの本体
-    acq_body: ?[]u8 = null,
+    acq_body: ?vfio.Map = null,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
-        const stderr = std.io.getStdErr().writer();
-
-        var vfio_container_fd: std.posix.fd_t = -1;
-        var vfio_group_fd: std.posix.fd_t = -1;
-        var vfio_device_fd: std.posix.fd_t = -1;
-        var bar0_map: []align(page_size_min) u8 = &[_]u8{};
-
-        errdefer {
-            if (bar0_map.len > 0) std.posix.munmap(bar0_map);
-            if (vfio_device_fd != -1) std.posix.close(vfio_device_fd);
-            if (vfio_group_fd != -1) std.posix.close(vfio_group_fd);
-            if (vfio_container_fd != -1) std.posix.close(vfio_container_fd);
-        }
-
-        ////////////////////////////////////////////////////////////////
-        // vfio経由でのアクセスセットアップ
-
-        // /dev/vfio/<group> をopen -> group FD
-        const vfio_group_path = try std.fmt.allocPrint(std.heap.page_allocator, "/dev/vfio/{d}", .{group_num});
-        defer std.heap.page_allocator.free(vfio_group_path);
-        vfio_group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
-
-        // グループの状態を確認する
-        var group_status: c.struct_vfio_group_status = undefined;
-        group_status.argsz = @sizeOf(@TypeOf(group_status));
-        const group_status_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status);
-        if (group_status_ret < 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_GET_STATUS failed: ret:{} errno:{}\n", .{ group_status_ret, errno });
-            return error.VfioGetGroupStatusFailed;
-        }
-        // グループがViableでない（例えば一部デバイスがホストドライバを使用中など）
-        if (group_status.flags & c.VFIO_GROUP_FLAGS_VIABLE == 0) {
-            try stderr.print("VFIO group is not viable\n", .{});
-            return error.VfioGroupNotViable;
-        }
-        // /dev/vfio/vfio をopen -> container FD
-        vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
-        // VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
-        const group_set_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd);
-        if (group_set_ret < 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_SET_CONTAINER failed: ret:{} errno: {}\n", .{ group_set_ret, errno });
-            return error.VfioSetContainerFailed;
-        }
-        // VFIO_SET_IOMMU でIOMMUタイプを設定
-        const set_iommu_ret = c.ioctl(vfio_container_fd, c.VFIO_SET_IOMMU, c.VFIO_TYPE1_IOMMU);
-        if (set_iommu_ret < 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_SET_IOMMU failed: ret:{} errno: {}\n", .{ set_iommu_ret, errno });
-            return error.VfioSetIommuFailed;
-        }
-
-        // デバイスのFDを取得
-        var pci_addr_cstr: [32]u8 = undefined;
-        @memcpy(pci_addr_cstr[0..pci_addr.len], pci_addr);
-        pci_addr_cstr[pci_addr.len] = 0;
-        const fd_result = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_DEVICE_FD, &pci_addr_cstr);
-        if (fd_result < 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GROUP_GET_DEVICE_FD failed: ret:{} errno:{}\n", .{ fd_result, errno });
-            return error.VfioGetDeviceFdFailed;
-        }
-        vfio_device_fd = @intCast(fd_result);
-        // VFIO_PCI_BAR0_REGION_INDEX でBAR0空間の情報を取得
-        var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
-        region_info.index = c.VFIO_PCI_BAR0_REGION_INDEX;
-        const get_region_ret = c.ioctl(vfio_device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &region_info);
-        if (get_region_ret != 0) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_DEVICE_GET_REGION_INFO failed: ret:{} errno:{}\n", .{ get_region_ret, errno });
-            // エラー処理
-            return error.VfioGetRegionInfoFailed;
-        }
-        //////////////////////////////////////////////////////////////////
-        // vfio_device_fd と region_info を使ってBAR0空間にアクセス
-        // BAR0をmmap
-        bar0_map = try std.posix.mmap(
-            null,
-            region_info.size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            vfio_device_fd,
-            region_info.offset,
-        );
-        const ctrl_reg: *volatile ControllerRegister = @ptrCast(bar0_map.ptr);
+        const vfio_container = try vfio.Container.open(pci_addr, group_num);
+        const ctrl_reg: *volatile ControllerRegister = @ptrCast(vfio_container.bar0_map);
         if (!ctrl_reg.isValid()) {
             return error.InvalidControllerRegister;
         }
-
         // 成功したのでリソースの所有権をムーブ
         const dev = NvmDevice{
             .pci_addr = pci_addr,
             .config = config.*,
-            .vfio_container_fd = vfio_container_fd,
-            .vfio_group_fd = vfio_group_fd,
-            .vfio_device_fd = vfio_device_fd,
-            .ctrl_reg_map = bar0_map,
+            .vfio_container = vfio_container,
             .ctrl_reg = ctrl_reg,
         };
-
-        // errdeferが発動しないように-1をセット
-        vfio_container_fd = -1;
-        vfio_group_fd = -1;
-        vfio_device_fd = -1;
-        bar0_map = &[_]u8{};
-
         return dev;
     }
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
-    pub fn close(self: NvmDevice) void {
+    pub fn close(self: NvmDevice) !void {
         // Release the ASQ
         if (self.asq_body) |asq_body| {
-            const asq_dma_unmap = c.vfio_iommu_type1_dma_unmap{
-                .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
-                .flags = 0,
-                .iova = self.config.iova_asq_base,
-                .size = asq_body.len,
-            };
-            const asq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &asq_dma_unmap);
-            if (asq_unmap_ret < 0) {
-                const errno = std.posix.errno(-1);
-                std.debug.print("VFIO_IOMMU_UNMAP_DMA failed: ret:{} errno:{}\n", .{ asq_unmap_ret, errno });
-            }
-            std.heap.page_allocator.free(asq_body);
+            try asq_body.unmap(self.vfio_container);
         }
-        // Release the ACQ
+        // Unmap the ASQ
         if (self.acq_body) |acq_body| {
-            const acq_dma_unmap = c.vfio_iommu_type1_dma_unmap{
-                .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
-                .flags = 0,
-                .iova = self.config.iova_acq_base,
-                .size = acq_body.len,
-            };
-            const acq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &acq_dma_unmap);
-            if (acq_unmap_ret < 0) {
-                const errno = std.posix.errno(-1);
-                std.debug.print("VFIO_IOMMU_UNMAP_DMA failed: ret:{} errno:{}\n", .{ acq_unmap_ret, errno });
-            }
-            std.heap.page_allocator.free(acq_body);
+            try acq_body.unmap(self.vfio_container);
         }
         // Unmap the controller registers
-        std.posix.munmap(self.ctrl_reg_map);
-        std.posix.close(self.vfio_device_fd);
-        std.posix.close(self.vfio_group_fd);
-        std.posix.close(self.vfio_container_fd);
+        self.vfio_container.close();
     }
 
     /// print hexdump of the controller registers.
@@ -350,6 +225,14 @@ const NvmDevice = struct {
     /// Controller Reset
     pub fn resetController(self: *NvmDevice) !void {
         // TODO: 確保済の場合、一旦開放処理をいれる
+        if (self.asq_body) |asq_body| {
+            try asq_body.unmap(self.vfio_container);
+            self.asq_body = null;
+        }
+        if (self.acq_body) |acq_body| {
+            try acq_body.unmap(self.vfio_container);
+            self.acq_body = null;
+        }
 
         // set en = 0 to disable the controller
         var cc_disable = self.ctrl_reg.cc;
