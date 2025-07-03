@@ -100,22 +100,53 @@ const NvmDeviceConfig = struct {
     timeout_sec: u32 = 10,
     /// Prefer the CAP.TO setting
     prefer_cap_to: bool = true,
+    /// Admin queue depth, minimum is 2
+    admin_queue_depth: u12 = 2,
+    /// Base address for I/O Virtual Address (IOVA) for admin submission queue
+    iova_asq_base: u64 = 0x10000000,
+    /// Base address for I/O Virtual Address (IOVA) for admin completion queue
+    iova_acq_base: u64 = 0x20000000,
+    /// Base address for I/O Virtual Address (IOVA) for I/O queues
+    iova_sq_base: u64 = 0x30000000,
+    /// Base address for I/O Virtual Address (IOVA) for I/O submission queue
+    iova_cq_base: u64 = 0x40000000,
+    /// Base address for I/O Virtual Address (IOVA) for data
+    iova_data_base: u64 = 0xa0000000,
 
     pub fn default() NvmDeviceConfig {
         return NvmDeviceConfig{
             .timeout_sec = 10,
             .prefer_cap_to = true,
+            .admin_queue_depth = 2,
+            .iova_asq_base = 0x10000000,
+            .iova_sq_base = 0x20000000,
+            .iova_data_base = 0x30000000,
+            .iova_acq_base = 0x40000000,
+            .iova_cq_base = 0x50000000,
         };
     }
 };
+
+/// NVMe device structure
 const NvmDevice = struct {
+    /// PCI address of the NVMe controller, e.g., "0000:00:1f.2"
     pci_addr: []const u8,
+    /// Configuration for the NVM device
     config: NvmDeviceConfig,
+    /// File descriptors for VFIO container, group, and device
     vfio_container_fd: std.posix.fd_t,
+    /// VFIO group file descriptor
     vfio_group_fd: std.posix.fd_t,
+    /// VFIO device file descriptor
     vfio_device_fd: std.posix.fd_t,
+    /// Memory-mapped region for the controller registers (BAR0)
     ctrl_reg_map: []align(page_size_min) u8,
+    /// Pointer to the controller registers
     ctrl_reg: *volatile ControllerRegister,
+    /// Admin Submission Queueの本体
+    asq_body: ?[]u32 = null,
+    /// Admin Completion Queueの本体
+    acq_body: ?[]u32 = null,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
@@ -238,6 +269,41 @@ const NvmDevice = struct {
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
     pub fn close(self: NvmDevice) void {
+        const admin_queue_depth = self.config.admin_queue_depth;
+        const asq_size = admin_queue_depth * @sizeOf(SubmissionQueueEntry);
+        const acq_size = admin_queue_depth * @sizeOf(CompletionQueueEntry);
+
+        // Release the ASQ
+        if (self.asq_body) |asq_body| {
+            const asq_dma_unmap = c.vfio_iommu_type1_dma_unmap{
+                .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
+                .flags = 0,
+                .iova = self.config.iova_asq_base,
+                .size = asq_size + acq_size,
+            };
+            const asq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &asq_dma_unmap);
+            if (asq_unmap_ret < 0) {
+                const errno = std.posix.errno(-1);
+                std.debug.print("VFIO_IOMMU_UNMAP_DMA failed: ret:{} errno:{}\n", .{ asq_unmap_ret, errno });
+            }
+            std.heap.page_allocator.free(asq_body);
+        }
+        // Release the ACQ
+        if (self.acq_body) |acq_body| {
+            const acq_dma_unmap = c.vfio_iommu_type1_dma_unmap{
+                .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
+                .flags = 0,
+                .iova = self.config.iova_acq_base,
+                .size = acq_size,
+            };
+            const acq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &acq_dma_unmap);
+            if (acq_unmap_ret < 0) {
+                const errno = std.posix.errno(-1);
+                std.debug.print("VFIO_IOMMU_UNMAP_DMA failed: ret:{} errno:{}\n", .{ acq_unmap_ret, errno });
+            }
+            std.heap.page_allocator.free(acq_body);
+        }
+        // Unmap the controller registers
         std.posix.munmap(self.ctrl_reg_map);
         std.posix.close(self.vfio_device_fd);
         std.posix.close(self.vfio_group_fd);
@@ -286,41 +352,88 @@ const NvmDevice = struct {
             return self.config.timeout_sec;
         }
     }
-    fn isTimeoutExceeded(self: *const NvmDevice, start: u64) bool {
+    fn isTimeoutExceeded(self: *const NvmDevice, start: i64) bool {
         const timeout_ms = self.timeoutSec() * 1000;
         return (std.time.milliTimestamp() - start) > timeout_ms;
     }
     /// Controller Reset
     pub fn resetController(self: *NvmDevice) !void {
+        // TODO: 確保済の場合、一旦開放処理をいれる
+
         // set en = 0 to disable the controller
-        {
-            self.ctrl_reg.cc.en = 0;
-            const start = std.time.milliTimestamp();
-            while (self.ctrl_reg.csts.rdy != 0) {
-                if (self.isTimeoutExceeded(start)) {
-                    return error.Timeout;
-                }
+        var cc_disable = self.ctrl_reg.cc;
+        cc_disable.en = 0;
+        @atomicStore(ControllerConfiguration, &self.ctrl_reg.cc, cc_disable, std.builtin.AtomicOrder.release);
+        const start_reset = std.time.milliTimestamp();
+        while (self.ctrl_reg.csts.rdy != 0) {
+            if (self.isTimeoutExceeded(start_reset)) {
+                return error.Timeout;
             }
         }
-        // TODO: vfio physical address space
+
         // allocate ASQ and ACQ
-        // const size = @sizeOf(u32) * self.ctrl_reg.cap.mqes;
-        // const asq = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, size);
-        // const acq = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, size);
+        const admin_queue_depth = self.config.admin_queue_depth;
+        const asq_size = admin_queue_depth * @sizeOf(SubmissionQueueEntry);
+        const acq_size = admin_queue_depth * @sizeOf(CompletionQueueEntry);
+        const asq_body = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, asq_size);
+        const acq_body = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, acq_size);
+        errdefer {
+            std.heap.page_allocator.free(asq_body);
+            std.heap.page_allocator.free(acq_body);
+        }
+
+        // IOVA address for ASQ and ACQ by VFIO
+        const asq_dma_map = c.vfio_iommu_type1_dma_map{
+            .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
+            .vaddr = @intFromPtr(asq_body.ptr),
+            .iova = self.config.iova_asq_base,
+            .size = asq_size + acq_size,
+            .flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
+        };
+        const asq_map_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_MAP_DMA, &asq_dma_map);
+        if (asq_map_ret < 0) {
+            const errno = std.posix.errno(-1);
+            try std.io.getStdErr().writer().print("VFIO_IOMMU_MAP_DMA failed: ret:{} errno:{}\n", .{ asq_map_ret, errno });
+            return error.VfioIommuMapDmaFailed;
+        }
+        const acq_dma_map = c.vfio_iommu_type1_dma_map{
+            .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
+            .vaddr = @intFromPtr(acq_body.ptr),
+            .iova = self.config.iova_acq_base,
+            .size = acq_size,
+            .flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
+        };
+        const acq_map_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_MAP_DMA, &acq_dma_map);
+        if (acq_map_ret < 0) {
+            const errno = std.posix.errno(-1);
+            try std.io.getStdErr().writer().print("VFIO_IOMMU_MAP_DMA failed: ret:{} errno:{}\n", .{ acq_map_ret, errno });
+            return error.VfioIommuMapDmaFailed;
+        }
 
         // set ASQ, ACQ, AQA
-        self.ctrl_reg.aqa = 0; // depth = 1
+        self.ctrl_reg.aqa = AdminQueueAttributes{
+            .asqs = admin_queue_depth,
+            ._rsvd0 = 0,
+            .acqs = admin_queue_depth,
+            ._rsvd1 = 0,
+        };
+        self.ctrl_reg.asq = @intCast(self.config.iova_asq_base);
+        self.ctrl_reg.acq = @intCast(self.config.iova_acq_base);
 
         // set en = 1 to enable the controller
-        {
-            self.ctrl_reg.cc.en = 1;
-            const start = std.time.milliTimestamp();
-            while (self.ctrl_reg.csts.rdy != 1) {
-                if (self.isTimeoutExceeded(start)) {
-                    return error.Timeout;
-                }
+        var cc_enable = self.ctrl_reg.cc;
+        cc_enable.en = 1;
+        @atomicStore(ControllerConfiguration, &self.ctrl_reg.cc, cc_enable, std.builtin.AtomicOrder.release);
+        const start_enable = std.time.milliTimestamp();
+        while (self.ctrl_reg.csts.rdy != 1) {
+            if (self.isTimeoutExceeded(start_enable)) {
+                return error.Timeout;
             }
         }
+
+        // ASQ and ACQ are now ready to use
+        self.asq_body = asq_body;
+        self.acq_body = acq_body;
     }
 };
 
@@ -333,7 +446,7 @@ const ControllerRegister = packed struct {
     _rsvd0: u32, // 0x18 Reserved
     csts: ControllerStatus, // 0x1C Controller Status
     nssr: u32, // 0x20 NVM Subsystem Reset (Optional)
-    aqa: u32, // 0x24 Admin Queue Attributes
+    aqa: AdminQueueAttributes, // 0x24 Admin Queue Attributes
     asq: u64, // 0x28 Admin Submission Queue Base Address
     acq: u64, // 0x30 Admin Completion Queue Base Address
 
@@ -475,6 +588,12 @@ const ControllerStatus = packed struct {
     st: u1, // [6] Shutdown Type 1 = NVM Subsystem Reset, 0 = Controller Level Resets
     _rsvd0: u25, // [31:07] Reserved
 };
+const AdminQueueAttributes = packed struct {
+    asqs: u12, // [11:0] Admin Submission Queue Size
+    _rsvd0: u4, // [15:12] Reserved
+    acqs: u12, // [27:16] Admin Completion Queue Size
+    _rsvd1: u4, // [31:28] Reserved
+};
 
 fn printHexdump(writer: anytype, data: []const u8, len: usize) !void {
     for (0..len) |i| {
@@ -534,7 +653,7 @@ pub fn main() !void {
         config.timeout_sec = timeout;
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
     }
-    const device = try NvmDevice.open(pci_addr, group_num, &config);
+    var device = try NvmDevice.open(pci_addr, group_num, &config);
     defer device.close();
     const status = device.status();
     if (verbose) {
@@ -550,4 +669,12 @@ pub fn main() !void {
 
         try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
+    device.resetController() catch |err| {
+        if (err == error.Timeout) {
+            try stderr.print("Controller reset timed out after {} seconds.\n", .{config.timeout_sec});
+        } else {
+            try stderr.print("Failed to reset controller: {}\n", .{err});
+        }
+        return err;
+    };
 }
