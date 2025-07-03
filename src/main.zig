@@ -5,6 +5,8 @@ const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
+const util = @import("util.zig");
+
 // VFIO用Cヘッダのインクルード
 const c = @cImport({
     @cInclude("linux/vfio.h");
@@ -144,9 +146,9 @@ const NvmDevice = struct {
     /// Pointer to the controller registers
     ctrl_reg: *volatile ControllerRegister,
     /// Admin Submission Queueの本体
-    asq_body: ?[]u32 = null,
+    asq_body: ?[]u8 = null,
     /// Admin Completion Queueの本体
-    acq_body: ?[]u32 = null,
+    acq_body: ?[]u8 = null,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
@@ -172,7 +174,7 @@ const NvmDevice = struct {
         defer std.heap.page_allocator.free(vfio_group_path);
         vfio_group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
 
-        // グループの状態を確認する（この呼び出し自体が重要）
+        // グループの状態を確認する
         var group_status: c.struct_vfio_group_status = undefined;
         group_status.argsz = @sizeOf(@TypeOf(group_status));
         const group_status_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_GET_STATUS, &group_status);
@@ -188,13 +190,6 @@ const NvmDevice = struct {
         }
         // /dev/vfio/vfio をopen -> container FD
         vfio_container_fd = try std.posix.open("/dev/vfio/vfio", .{ .ACCMODE = .RDWR }, 0);
-        // APIバージョンを確認
-        const api_ver_ret = c.ioctl(vfio_container_fd, c.VFIO_GET_API_VERSION);
-        if (api_ver_ret != c.VFIO_API_VERSION) {
-            const errno = std.posix.errno(-1);
-            try stderr.print("VFIO_GET_API_VERSION failed: ret:{} errno:{}\n", .{ api_ver_ret, errno });
-            return error.VfioUnknownApiVersion;
-        }
         // VFIO_GROUP_SET_CONTAINER でコンテナにグループを登録
         const group_set_ret = c.ioctl(vfio_group_fd, c.VFIO_GROUP_SET_CONTAINER, &vfio_container_fd);
         if (group_set_ret < 0) {
@@ -312,7 +307,7 @@ const NvmDevice = struct {
 
     /// print hexdump of the controller registers.
     pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
-        try printHexdump(writer, self.ctrl_reg_map, @sizeOf(ControllerRegister));
+        try util.printHexdump(writer, self.ctrl_reg_map, @sizeOf(ControllerRegister));
     }
 
     /// Get the status of the NVM device based on the controller registers.
@@ -373,10 +368,10 @@ const NvmDevice = struct {
 
         // allocate ASQ and ACQ
         const admin_queue_depth = self.config.admin_queue_depth;
-        const asq_size = admin_queue_depth * @sizeOf(SubmissionQueueEntry);
-        const acq_size = admin_queue_depth * @sizeOf(CompletionQueueEntry);
-        const asq_body = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, asq_size);
-        const acq_body = try std.heap.page_allocator.alignedAlloc(u32, page_size_min, acq_size);
+        const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
+        const acq_size = util.alignUp(admin_queue_depth * @sizeOf(CompletionQueueEntry), page_size_min);
+        const asq_body = try std.heap.page_allocator.alignedAlloc(u8, page_size_min, asq_size);
+        const acq_body = try std.heap.page_allocator.alignedAlloc(u8, page_size_min, acq_size);
         errdefer {
             std.heap.page_allocator.free(asq_body);
             std.heap.page_allocator.free(acq_body);
@@ -387,9 +382,10 @@ const NvmDevice = struct {
             .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
             .vaddr = @intFromPtr(asq_body.ptr),
             .iova = self.config.iova_asq_base,
-            .size = asq_size + acq_size,
+            .size = asq_body.len,
             .flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
         };
+        std.debug.print("asq_dma_map: {any}\n", .{asq_dma_map});
         const asq_map_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_MAP_DMA, &asq_dma_map);
         if (asq_map_ret < 0) {
             const errno = std.posix.errno(-1);
@@ -496,7 +492,12 @@ test "NVMe Version String Format" {
         ._rsvd0 = 0,
         .csts = undefined,
         .nssr = 0,
-        .aqa = 0,
+        .aqa = AdminQueueAttributes{
+            .asqs = 2, // Admin Submission Queue Size
+            ._rsvd0 = 0,
+            .acqs = 2, // Admin Completion Queue Size
+            ._rsvd1 = 0,
+        },
         .asq = 0,
         .acq = 0,
     };
@@ -595,16 +596,6 @@ const AdminQueueAttributes = packed struct {
     _rsvd1: u4, // [31:28] Reserved
 };
 
-fn printHexdump(writer: anytype, data: []const u8, len: usize) !void {
-    for (0..len) |i| {
-        if (i % 16 == 0) {
-            try writer.print("\n{x:08}: ", .{i});
-        }
-        try writer.print("{x:02} ", .{data[i]});
-    }
-    try writer.print("\n", .{});
-}
-
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
@@ -655,14 +646,14 @@ pub fn main() !void {
     }
     var device = try NvmDevice.open(pci_addr, group_num, &config);
     defer device.close();
-    const status = device.status();
+    const init_status = device.status();
     if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
         try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
             pci_addr,
             version,
-            status,
+            init_status,
         });
         try stdout.print("Controller Register Raw:", .{});
         try device.printRaw(stdout);
@@ -677,4 +668,13 @@ pub fn main() !void {
         }
         return err;
     };
+    const enabled_status = device.status();
+    if (enabled_status != DeviceStatus.Enabled) {
+        try stderr.print("Controller is not enabled after reset. Current status: {}\n", .{enabled_status});
+        return error.ControllerNotEnabled;
+    }
+    if (verbose) {
+        try stdout.print("Controller reset completed. Current status: {}\n", .{enabled_status});
+        try stdout.print("Controller is enabled and ready.\n", .{});
+    }
 }
