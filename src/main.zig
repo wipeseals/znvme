@@ -264,17 +264,13 @@ const NvmDevice = struct {
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
     pub fn close(self: NvmDevice) void {
-        const admin_queue_depth = self.config.admin_queue_depth;
-        const asq_size = admin_queue_depth * @sizeOf(SubmissionQueueEntry);
-        const acq_size = admin_queue_depth * @sizeOf(CompletionQueueEntry);
-
         // Release the ASQ
         if (self.asq_body) |asq_body| {
             const asq_dma_unmap = c.vfio_iommu_type1_dma_unmap{
                 .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
                 .flags = 0,
                 .iova = self.config.iova_asq_base,
-                .size = asq_size + acq_size,
+                .size = asq_body.len,
             };
             const asq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &asq_dma_unmap);
             if (asq_unmap_ret < 0) {
@@ -289,7 +285,7 @@ const NvmDevice = struct {
                 .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
                 .flags = 0,
                 .iova = self.config.iova_acq_base,
-                .size = acq_size,
+                .size = acq_body.len,
             };
             const acq_unmap_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_UNMAP_DMA, &acq_dma_unmap);
             if (acq_unmap_ret < 0) {
