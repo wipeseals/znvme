@@ -121,10 +121,10 @@ const NvmDeviceConfig = struct {
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
             .iova_asq_base = 0x10000000,
-            .iova_sq_base = 0x20000000,
-            .iova_data_base = 0x30000000,
-            .iova_acq_base = 0x40000000,
-            .iova_cq_base = 0x50000000,
+            .iova_acq_base = 0x20000000,
+            .iova_sq_base = 0x30000000,
+            .iova_cq_base = 0x40000000,
+            .iova_data_base = 0xa0000000,
         };
     }
 };
