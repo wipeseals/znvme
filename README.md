@@ -2,19 +2,19 @@
 
 [![zig test](https://github.com/wipeseals/znvme/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/wipeseals/znvme/actions/workflows/test.yml)
 
-A Zig library for accessing NVMe devices in user space.  
-This library provides a user space interface to NVMe devices, allowing direct access to device registers and features without needing to go through the kernel's NVMe driver.
+A userspace NVMe driver implemented in Zig, leveraging VFIO for direct hardware access.
 
 ## Features
 
 - Direct access to NVMe device registers and features from user space.
-- Support for multiple NVMe devices.
+- Secure operation without sudo by using VFIO.
 - Easy integration with Zig applications.
 
 ## Requirements
 
-- Zig 0.14.0 or later
-- Linux kernel with `uio_pci_generic` support
+- Zig 0.14.1 or later
+- Linux kernel with `vfio-pci` support
+    - IOMMU enabled in the kernel (Intel VT-d or AMD-Vi)
 - NVMe devices connected to the system
 
 ## Installation
