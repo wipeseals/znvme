@@ -9,7 +9,7 @@
       "args": [
         "--",
         "-v",
-        "${input:pciAddress}",
+        "${input:pcidev}",
       ],
       "preLaunchTask": "zig build",
       "cwd": "${workspaceFolder}",
