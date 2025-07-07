@@ -1,7 +1,6 @@
 // src/main.zig
 const std = @import("std");
 const expect = std.testing.expect;
-const page_size_min = std.heap.page_size_min;
 
 const clap = @import("clap");
 
@@ -12,11 +11,9 @@ const util = @import("util.zig");
 const c = @cImport({
     @cInclude("linux/vfio.h");
     @cInclude("sys/ioctl.h");
-    @cInclude("fcntl.h");
-    @cInclude("sys/mman.h");
-    @cInclude("unistd.h");
-    @cInclude("stdint.h");
 });
+
+const page_size_min = std.heap.page_size_min;
 
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...

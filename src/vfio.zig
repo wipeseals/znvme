@@ -1,17 +1,14 @@
 const std = @import("std");
 const fs = std.fs;
-const page_size_min = std.heap.page_size_min;
 const util = @import("util.zig");
 
 const c = @cImport({
     @cInclude("linux/vfio.h");
     @cInclude("sys/ioctl.h");
-    @cInclude("fcntl.h");
     @cInclude("sys/mman.h");
-    @cInclude("unistd.h");
-    @cInclude("stdint.h");
 });
 
+const page_size_min = std.heap.page_size_min;
 const allocator = std.heap.page_allocator;
 
 /// Represents a mapping between an I/O Virtual Address (IOVA) and a buffer.
