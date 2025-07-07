@@ -142,6 +142,29 @@ const NvmDevice = struct {
     /// Admin Completion Queueの本体
     acq_body: ?vfio.MappedBuf = null,
 
+    fn timeoutSec(self: *const NvmDevice) u32 {
+        if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
+            return self.ctrl_reg.cap.to;
+        } else {
+            return self.config.timeout_sec;
+        }
+    }
+    fn isTimeoutExceeded(self: *const NvmDevice, start: i64) bool {
+        const timeout_ms = self.timeoutSec() * 1000;
+        return (std.time.milliTimestamp() - start) > timeout_ms;
+    }
+
+    fn freeAdminQueues(self: *NvmDevice) !void {
+        if (self.asq_body) |_| {
+            try self.asq_body.?.free(&self.vfio_container);
+        }
+        if (self.acq_body) |_| {
+            try self.acq_body.?.free(&self.vfio_container);
+        }
+        self.asq_body = null;
+        self.acq_body = null;
+    }
+
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
         const vfio_container = try vfio.Container.create(pci_addr);
@@ -161,14 +184,22 @@ const NvmDevice = struct {
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
     pub fn close(self: *NvmDevice) !void {
-        // Release the ASQ
-        if (self.asq_body) |_| {
-            try self.asq_body.?.free(&self.vfio_container);
+        // If the device is enabled, attempt to shut it down gracefully
+        if (self.status() != DeviceStatus.Disabled) {
+            self.shutdown(ShutdownNotification.normal) catch |err| {
+                if (err != error.Timeout) {
+                    return err; // Only propagate non-timeout errors
+                }
+                // controller disable if shutdown failed
+                self.reset() catch |reset_err| {
+                    if (reset_err != error.Timeout) {
+                        return reset_err; // Only propagate non-timeout errors
+                    }
+                };
+            };
         }
-        // Unmap the ASQ
-        if (self.acq_body) |_| {
-            try self.acq_body.?.free(&self.vfio_container);
-        }
+        // Release the ASQ/ACQ buffers if they were allocated
+        try self.freeAdminQueues();
         // Unmap the controller registers
         self.vfio_container.remove();
     }
@@ -208,29 +239,8 @@ const NvmDevice = struct {
         };
         return ret;
     }
-    fn timeoutSec(self: *const NvmDevice) u32 {
-        if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
-            return self.ctrl_reg.cap.to;
-        } else {
-            return self.config.timeout_sec;
-        }
-    }
-    fn isTimeoutExceeded(self: *const NvmDevice, start: i64) bool {
-        const timeout_ms = self.timeoutSec() * 1000;
-        return (std.time.milliTimestamp() - start) > timeout_ms;
-    }
     /// Controller Reset
     pub fn reset(self: *NvmDevice) !void {
-        // Check if the controller is already enabled
-        if (self.asq_body) |_| {
-            try self.asq_body.?.free(&self.vfio_container);
-        }
-        self.asq_body = null;
-        if (self.acq_body) |_| {
-            try self.acq_body.?.free(&self.vfio_container);
-        }
-        self.acq_body = null;
-
         // set en = 0 to disable the controller
         var cc_disable = self.ctrl_reg.cc;
         cc_disable.en = 0;
@@ -244,6 +254,9 @@ const NvmDevice = struct {
     }
 
     pub fn enable(self: *NvmDevice) !void {
+        // Check if the Admin Queue already exists
+        try self.freeAdminQueues();
+
         // allocate ASQ and ACQ
         const admin_queue_depth = self.config.admin_queue_depth;
         const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
@@ -294,6 +307,28 @@ const NvmDevice = struct {
         const start_reset = std.time.milliTimestamp();
         while (self.ctrl_reg.csts.nssro == 0) {
             if (self.isTimeoutExceeded(start_reset)) {
+                return error.Timeout;
+            }
+        }
+    }
+
+    pub fn shutdown(self: *NvmDevice, shn: ShutdownNotification) !void {
+        // already shutdown?
+        if (self.status() == DeviceStatus.Shutdown) {
+            return;
+        }
+
+        // set SHN in Controller Configuration
+        if (self.status() != DeviceStatus.ShutdownInProgress) {
+            var cc_shutdown = self.ctrl_reg.cc;
+            cc_shutdown.shn = shn;
+            @atomicStore(ControllerConfiguration, &self.ctrl_reg.cc, cc_shutdown, std.builtin.AtomicOrder.release);
+        }
+
+        // wait for shutdown to complete
+        const start_shutdown = std.time.milliTimestamp();
+        while (self.ctrl_reg.csts.shst != ShutdownStatus.shutdown) {
+            if (self.isTimeoutExceeded(start_shutdown)) {
                 return error.Timeout;
             }
         }
@@ -476,7 +511,7 @@ pub fn main() !void {
         \\-h, --help             Display this help and exit.
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
-        \\<str>                  PCI address of the NVMe controller (e.g., 0000:00:1f.2).
+        \\<str>                  PCI address BDF (e.g., 0000:00:1f.2) of the NVMe controller.
     );
     var diag = clap.Diagnostic{};
     var res = clap.parse(clap.Help, &params, clap.parsers.default, .{ .diagnostic = &diag, .allocator = allocator }) catch |err| {
@@ -506,28 +541,27 @@ pub fn main() !void {
     }
     var device = try NvmDevice.open(pci_addr, &config);
     defer device.close() catch {};
-    device.resetAndEnable() catch |err| {
-        if (err == error.Timeout) {
-            try stderr.print("Controller reset timed out after {} seconds.\n", .{config.timeout_sec});
-        } else {
-            try stderr.print("Failed to reset controller: {}\n", .{err});
-        }
-        return err;
-    };
-    const enabled_status = device.status();
-    if (enabled_status != DeviceStatus.Enabled) {
-        try stderr.print("Controller is not enabled after reset. Current status: {}\n", .{enabled_status});
-        return error.ControllerNotEnabled;
-    }
     if (verbose) {
-        try stdout.print("Controller reset completed. Current status: {}\n", .{enabled_status});
-        try stdout.print("Controller is enabled and ready.\n", .{});
+        try stdout.print("[Initial] Current status: {}\n", .{device.status()});
+    }
+
+    try device.resetAndEnable();
+    if (verbose) {
+        try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
+    }
+
+    try device.shutdown(ShutdownNotification.normal);
+    if (verbose) {
+        try stdout.print("[Post-Shutdown] Current status: {}\n", .{device.status()});
+    }
+
+    if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
         try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
             pci_addr,
             version,
-            enabled_status,
+            device.status(),
         });
         try stdout.print("Controller Register Raw:", .{});
         try device.printRaw(stdout);
