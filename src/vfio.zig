@@ -39,12 +39,12 @@ pub const Map = struct {
     }
 };
 pub const MappedBuf = struct {
-    buf: []const u8,
+    buf: []align(page_size_min) u8,
     map: Map,
 
     /// Initializes a new MappedBuf instance with the specified I/O Virtual Address (IOVA) and flags.
     pub fn alloc(iova: u64, size: usize, flags: c_uint, vfio: *Container) !MappedBuf {
-        const buf = try allocator.alloc(u8, size);
+        const buf = try allocator.alignedAlloc(u8, page_size_min, size);
         errdefer allocator.free(buf);
         const map = try Map.create(iova, buf, flags, vfio);
         return MappedBuf{
