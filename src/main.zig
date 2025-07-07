@@ -18,7 +18,7 @@ const sleep_ns = 10; // 10ns
 
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...
-const SubmissionQueueEntry = packed struct {
+const SQEntry = packed struct {
     cdw0: SQDword0, // Submission Queue Dword 0
     nsid: u32, // Namespace Identifier
     cdw2: u32, // Command Dword 2
@@ -33,7 +33,7 @@ const SubmissionQueueEntry = packed struct {
     cdw15: u32, // Command Dword 15
 };
 test "Submission Queue Size" {
-    const size = @sizeOf(SubmissionQueueEntry);
+    const size = @sizeOf(SQEntry);
     try expect(size == 64); // 16 * u32 = 64 bytes
 }
 /// Submission Queue Dword 0 structure
@@ -127,6 +127,102 @@ const NvmDeviceConfig = struct {
         };
     }
 };
+/// Queue control structure for managing submission and completion queues
+const SQManage = struct {
+    /// tail pointer
+    tail: usize = 0,
+    /// number of entries
+    count: usize = 0,
+    /// Maximum depth of the queue
+    depth: usize = 0,
+    /// body of the queue
+    entries: []SQEntry = undefined,
+
+    pub fn create(
+        d: usize,
+        buf: []align(page_size_min) u8,
+    ) !SQManage {
+        // check if the buffer size is sufficient
+        if (buf.len < @sizeOf(SQEntry) * d) {
+            return error.BufferTooSmall;
+        }
+        // create the queue structure
+        return SQManage{
+            .tail = 0,
+            .count = 0,
+            .depth = d,
+            .entries = @ptrCast(buf),
+        };
+    }
+
+    pub fn isFull(self: *const SQManage) bool {
+        return self.count >= self.depth;
+    }
+
+    pub fn isEmpty(self: *const SQManage) bool {
+        return self.count == 0;
+    }
+
+    pub fn pushTail(self: *SQManage, entry: *const SQEntry) !void {
+        if (self.isFull()) {
+            return error.QueueFull;
+        }
+        self.entries[self.tail] = entry;
+        self.tail = (self.tail + 1) % self.depth;
+        self.count += 1;
+    }
+
+    pub fn send(self: *SQManage, sq_doorbell: *u64) !usize {
+        // Ensure the queue is not empty before updating the doorbell
+        if (self.isEmpty()) {
+            return error.QueueEmpty;
+        }
+        // Update the tail pointer in the doorbell
+        @atomicStore(u32, &sq_doorbell, @intCast(self.tail), std.builtin.AtomicOrder.release);
+        // clear the count
+        const old_count = self.count;
+        self.count = 0;
+        return old_count; // Return the number of entries that were pushed
+    }
+};
+
+const CQManage = struct {
+    /// head pointer
+    head: usize = 0,
+    /// number of entries
+    count: usize = 0,
+    /// Maximum depth of the queue
+    depth: usize = 0,
+    /// body of the queue
+    entries: []CompletionQueueEntry = undefined,
+
+    pub fn create(
+        d: usize,
+        buf: []align(page_size_min) u8,
+    ) !CQManage {
+        // check if the buffer size is sufficient
+        if (buf.len < @sizeOf(CompletionQueueEntry) * d) {
+            return error.BufferTooSmall;
+        }
+        // create the queue structure
+        return CQManage{
+            .head = 0,
+            .count = 0,
+            .depth = d,
+            .entries = @ptrCast(buf),
+        };
+    }
+
+    pub fn isFull(self: *const CQManage) bool {
+        return self.count >= self.depth;
+    }
+
+    pub fn isEmpty(self: *const CQManage) bool {
+        return self.count == 0;
+    }
+
+    // TODO: sync cqhdbl
+};
 
 /// NVMe device structure
 const NvmDevice = struct {
@@ -138,10 +234,14 @@ const NvmDevice = struct {
     ctrl_reg: *volatile ControllerRegister,
     /// VFIO Container
     vfio_container: vfio.Container,
-    /// Admin Submission Queueの本体
+    /// Admin Submission Queue DataBody
     asq_body: ?vfio.MappedBuf = null,
-    /// Admin Completion Queueの本体
+    /// Admin Completion Queue DataBody
     acq_body: ?vfio.MappedBuf = null,
+    // Admin Submission Queue Management
+    asq: SQManage = undefined,
+    // Admin Completion Queue Management
+    acq: CQManage = undefined,
 
     fn timeoutSec(self: *const NvmDevice) u32 {
         if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
@@ -261,12 +361,16 @@ const NvmDevice = struct {
 
         // allocate ASQ and ACQ
         const admin_queue_depth = self.config.admin_queue_depth;
-        const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
+        const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SQEntry), page_size_min);
         const acq_size = util.alignUp(admin_queue_depth * @sizeOf(CompletionQueueEntry), page_size_min);
         const flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE;
         self.asq_body = try vfio.MappedBuf.alloc(self.config.iova_asq_base, asq_size, flags, &self.vfio_container);
         self.acq_body = try vfio.MappedBuf.alloc(self.config.iova_acq_base, acq_size, flags, &self.vfio_container);
+        self.asq = try SQManage.create(admin_queue_depth, self.asq_body.?.buf);
+        self.acq = try CQManage.create(admin_queue_depth, self.acq_body.?.buf);
         errdefer {
+            self.asq = undefined;
+            self.acq = undefined;
             self.asq_body.?.free(&self.vfio_container) catch {};
             self.acq_body.?.free(&self.vfio_container) catch {};
             self.asq_body = null;
@@ -337,6 +441,24 @@ const NvmDevice = struct {
             }
             std.time.sleep(sleep_ns);
         }
+    }
+
+    pub fn pushAdminCmd(self: *NvmDevice, cmd: *const SQEntry) !void {
+        // Check if the Controller is enabled and ready
+        if (self.status() != DeviceStatus.Enabled) {
+            try self.resetAndEnable();
+        }
+        // Push the command to the ASQ
+        try self.asq.pushTail(&cmd);
+    }
+
+    pub fn updateAsqDoorbell(self: *NvmDevice) !usize {
+        // Check if the Controller is enabled and ready
+        if (self.status() != DeviceStatus.Enabled) {
+            return error.ControllerNotReady;
+        }
+        const pushed_count = try self.asq.send(&self.ctrl_reg.asq);
+        return pushed_count;
     }
 };
 
