@@ -146,8 +146,8 @@ const NvmDevice = struct {
     acq_body: ?vfio.MappedBuf = null,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
-    pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
-        const vfio_container = try vfio.Container.create(pci_addr, group_num);
+    pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
+        const vfio_container = try vfio.Container.create(pci_addr);
         const ctrl_reg: *volatile ControllerRegister = @ptrCast(vfio_container.bar0_map);
         if (!ctrl_reg.isValid()) {
             return error.InvalidControllerRegister;
@@ -459,7 +459,6 @@ pub fn main() !void {
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
         \\<str>                  PCI address of the NVMe controller (e.g., 0000:00:1f.2).
-        \\<u32>                  IOMMU group number (required).
     );
     var diag = clap.Diagnostic{};
     var res = clap.parse(clap.Help, &params, clap.parsers.default, .{ .diagnostic = &diag, .allocator = allocator }) catch |err| {
@@ -478,12 +477,6 @@ pub fn main() !void {
         return clap.help(stderr, clap.Help, &params, .{}); // 共通化
     };
 
-    // TODO: readlink -f /sys/bus/pci/devices/<pci_addr>/iommu_group  相当を行ってgroup_numを取得できるはず
-    const group_num = res.positionals[1] orelse {
-        try stderr.print("IOMMU group number is required.\n", .{});
-        return error.InvalidArgument;
-    };
-
     var config = NvmDeviceConfig.default();
     if (res.args.timeout) |timeout| {
         if (timeout < 1) {
@@ -493,7 +486,7 @@ pub fn main() !void {
         config.timeout_sec = timeout;
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
     }
-    var device = try NvmDevice.open(pci_addr, group_num, &config);
+    var device = try NvmDevice.open(pci_addr, &config);
     defer device.close() catch {};
     device.resetController() catch |err| {
         if (err == error.Timeout) {

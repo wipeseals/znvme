@@ -1,4 +1,5 @@
 const std = @import("std");
+const fs = std.fs;
 const page_size_min = std.heap.page_size_min;
 const util = @import("util.zig");
 
@@ -69,7 +70,7 @@ pub const Container = struct {
     device_fd: std.posix.fd_t,
     bar0_map: []align(page_size_min) u8,
 
-    pub fn create(pci_addr: []const u8, group_num: u32) !Container {
+    pub fn create(pci_addr: []const u8) !Container {
         var container_fd: std.posix.fd_t = -1;
         var group_fd: std.posix.fd_t = -1;
         var device_fd: std.posix.fd_t = -1;
@@ -81,6 +82,21 @@ pub const Container = struct {
             if (group_fd != -1) std.posix.close(group_fd);
             if (container_fd != -1) std.posix.close(container_fd);
         }
+
+        // PCIアドレスからグループ番号を取得
+        // IOMMUグループへのシンボリックリンクのパスを構築し、指し先からiommu_groupsのグループ番号を取得
+        // e.g. : ../../../../kernel/iommu_groups/14
+        const symlink_path = try std.fmt.allocPrint(
+            allocator,
+            "/sys/bus/pci/devices/{s}/iommu_group",
+            .{pci_addr},
+        );
+        defer allocator.free(symlink_path);
+        var link_target_cstr: [fs.max_path_bytes]u8 = undefined;
+        const link_target = try std.fs.readLinkAbsolute(symlink_path, &link_target_cstr);
+        // パスから末尾のファイル名（グループ番号の文字列）を抽出
+        const group_name_str = std.fs.path.basename(link_target);
+        const group_num = try std.fmt.parseInt(u32, group_name_str, 10);
 
         // /dev/vfio/<group> をopen -> group FD
         const vfio_group_path = try std.fmt.allocPrint(allocator, "/dev/vfio/{d}", .{group_num});

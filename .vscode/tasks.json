@@ -14,7 +14,7 @@
 		{
 			"type": "shell",
 			"label": "zig build run",
-			"command": "zig build run -- ${input:pcidev} ${input:iommu_groupid} -v",
+			"command": "zig build run -- -v ${input:pcidev}",
 			"group": "build",
 			"isBackground": false,
 			"problemMatcher": [
@@ -39,10 +39,5 @@
 			"description": "PCIデバイスIDを入力してください (例: 0000:01:00.0)",
 			"default": "0000:01:00.0"
 		},
-		{
-		  "id": "iommu_groupid",
-		  "type": "promptString",
-		  "description": "Enter IOMMU group ID (e.g. 0)",
-		}
 	]
 }
