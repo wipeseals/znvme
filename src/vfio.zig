@@ -1,50 +1,75 @@
 const std = @import("std");
-const c = @import("c.zig");
 const page_size_min = std.heap.page_size_min;
 const util = @import("util.zig");
 
-/// Represents a mapping between an I/O Virtual Address (IOVA) and a buffer.
-/// TODO: bufferの確保も内在させ、Freeの責務をはっきりさせておく
-pub const Map = struct {
-    pub iova: u64;
-    pub buf: []const u8;
-    pub flags: c_uint;
-    active: bool = false;
+const c = @cImport({
+    @cInclude("linux/vfio.h");
+    @cInclude("sys/ioctl.h");
+    @cInclude("fcntl.h");
+    @cInclude("sys/mman.h");
+    @cInclude("unistd.h");
+    @cInclude("stdint.h");
+});
 
-    pub fn init(iova: u64, buf: []const u8, flags: c_uint) Map {
-        return Map{
+const allocator = std.heap.page_allocator;
+
+/// Represents a mapping between an I/O Virtual Address (IOVA) and a buffer.
+pub const Map = struct {
+    iova: u64,
+    buf: []const u8,
+    flags: c_uint,
+    active: bool,
+
+    /// Initializes and maps a new Map instance with the specified IOVA, buffer, and flags.
+    pub fn create(iova: u64, buf: []const u8, flags: c_uint, vfio: *Container) !Map {
+        var map = Map{
             .iova = iova,
             .buf = buf,
             .flags = flags,
             .active = false,
         };
-    }
-
-    /// Creates a new Map instance with the specified I/O Virtual Address (IOVA), buffer, and flags.
-    pub fn open(self: *Map, vfio: *Container) !Map {
-        try vfio.map_dma(self);
-        return self;
+        try vfio.map_dma(&map);
+        return map;
     }
 
     /// Unmaps the DMA region associated with this Map instance.
-    pub fn close(self: *Map, vfio: *Container) !void {
+    pub fn delete(self: *Map, vfio: *Container) !void {
         if (!self.active) {
             return; // Already unmapped
         }
         try vfio.unmap_dma(self);
-        // free buffer
+    }
+};
+pub const MappedBuf = struct {
+    buf: []const u8,
+    map: Map,
 
+    /// Initializes a new MappedBuf instance with the specified I/O Virtual Address (IOVA) and flags.
+    pub fn alloc(iova: u64, size: usize, flags: c_uint, vfio: *Container) !MappedBuf {
+        const buf = try allocator.alloc(u8, size);
+        errdefer allocator.free(buf);
+        const map = try Map.create(iova, buf, flags, vfio);
+        return MappedBuf{
+            .buf = buf,
+            .map = map,
+        };
+    }
+
+    /// Opens the mapping for the specified I/O Virtual Address (IOVA) and flags.
+    pub fn free(self: *MappedBuf, vfio: *Container) !void {
+        try self.map.delete(vfio);
+        allocator.free(self.buf);
     }
 };
 
 /// VFIO (Virtual Function I/O) interface for managing PCI devices in a virtualized environment.
 pub const Container = struct {
-    pub container_fd: std.posix.fd_t;
-    pub group_fd: std.posix.fd_t;
-    pub device_fd: std.posix.fd_t;
-    pub bar0_map: []align(page_size_min) u8;
+    container_fd: std.posix.fd_t,
+    group_fd: std.posix.fd_t,
+    device_fd: std.posix.fd_t,
+    bar0_map: []align(page_size_min) u8,
 
-    pub fn open(pci_addr: []const u8, group_num: u32) !Container {
+    pub fn create(pci_addr: []const u8, group_num: u32) !Container {
         var container_fd: std.posix.fd_t = -1;
         var group_fd: std.posix.fd_t = -1;
         var device_fd: std.posix.fd_t = -1;
@@ -58,8 +83,8 @@ pub const Container = struct {
         }
 
         // /dev/vfio/<group> をopen -> group FD
-        const vfio_group_path = try std.fmt.allocPrint(std.heap.page_allocator, "/dev/vfio/{d}", .{group_num});
-        defer std.heap.page_allocator.free(vfio_group_path);
+        const vfio_group_path = try std.fmt.allocPrint(allocator, "/dev/vfio/{d}", .{group_num});
+        defer allocator.free(vfio_group_path);
         group_fd = try std.posix.open(vfio_group_path, .{ .ACCMODE = .RDWR }, 0);
 
         // グループの状態を確認する
@@ -120,7 +145,7 @@ pub const Container = struct {
         };
     }
 
-    pub fn close(self: *Container) void {
+    pub fn remove(self: *Container) void {
         // Unmap the controller registers
         std.posix.munmap(self.bar0_map);
         std.posix.close(self.device_fd);
@@ -157,7 +182,6 @@ pub const Container = struct {
             .flags = 0,
             .iova = map.iova,
             .size = map.buf.len,
-            .vaddr = @intFromPtr(map.buf.ptr),
         };
         map.active = false;
         const ret = c.ioctl(self.container_fd, c.VFIO_IOMMU_UNMAP_DMA, &dma_unmap);

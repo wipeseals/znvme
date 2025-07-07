@@ -141,13 +141,13 @@ const NvmDevice = struct {
     /// VFIO Container
     vfio_container: vfio.Container,
     /// Admin Submission Queueの本体
-    asq_body: ?vfio.Map = null,
+    asq_body: ?vfio.MappedBuf = null,
     /// Admin Completion Queueの本体
-    acq_body: ?vfio.Map = null,
+    acq_body: ?vfio.MappedBuf = null,
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, group_num: u32, config: *const NvmDeviceConfig) !NvmDevice {
-        const vfio_container = try vfio.Container.open(pci_addr, group_num);
+        const vfio_container = try vfio.Container.create(pci_addr, group_num);
         const ctrl_reg: *volatile ControllerRegister = @ptrCast(vfio_container.bar0_map);
         if (!ctrl_reg.isValid()) {
             return error.InvalidControllerRegister;
@@ -163,22 +163,22 @@ const NvmDevice = struct {
     }
 
     /// Deinitialize the NVM device, unmapping the controller registers and closing the file descriptor.
-    pub fn close(self: NvmDevice) !void {
+    pub fn close(self: *NvmDevice) !void {
         // Release the ASQ
-        if (self.asq_body) |asq_body| {
-            try asq_body.unmap(self.vfio_container);
+        if (self.asq_body) |_| {
+            try self.asq_body.?.free(&self.vfio_container);
         }
         // Unmap the ASQ
-        if (self.acq_body) |acq_body| {
-            try acq_body.unmap(self.vfio_container);
+        if (self.acq_body) |_| {
+            try self.acq_body.?.free(&self.vfio_container);
         }
         // Unmap the controller registers
-        self.vfio_container.close();
+        self.vfio_container.remove();
     }
 
     /// print hexdump of the controller registers.
     pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
-        try util.printHexdump(writer, self.ctrl_reg_map, @sizeOf(ControllerRegister));
+        try util.printHexdump(writer, self.vfio_container.bar0_map, @sizeOf(ControllerRegister));
     }
 
     /// Get the status of the NVM device based on the controller registers.
@@ -223,16 +223,17 @@ const NvmDevice = struct {
         return (std.time.milliTimestamp() - start) > timeout_ms;
     }
     /// Controller Reset
+    /// Allocator must be set to std.heap.page_allocator.
     pub fn resetController(self: *NvmDevice) !void {
-        // TODO: 確保済の場合、一旦開放処理をいれる
-        if (self.asq_body) |asq_body| {
-            try asq_body.unmap(self.vfio_container);
-            self.asq_body = null;
+        // Check if the controller is already enabled
+        if (self.asq_body) |_| {
+            try self.asq_body.?.free(&self.vfio_container);
         }
-        if (self.acq_body) |acq_body| {
-            try acq_body.unmap(self.vfio_container);
-            self.acq_body = null;
+        self.asq_body = null;
+        if (self.acq_body) |_| {
+            try self.acq_body.?.free(&self.vfio_container);
         }
+        self.acq_body = null;
 
         // set en = 0 to disable the controller
         var cc_disable = self.ctrl_reg.cc;
@@ -249,42 +250,15 @@ const NvmDevice = struct {
         const admin_queue_depth = self.config.admin_queue_depth;
         const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
         const acq_size = util.alignUp(admin_queue_depth * @sizeOf(CompletionQueueEntry), page_size_min);
-        const asq_body = try std.heap.page_allocator.alignedAlloc(u8, page_size_min, asq_size);
-        const acq_body = try std.heap.page_allocator.alignedAlloc(u8, page_size_min, acq_size);
+        const flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE;
+        self.asq_body = try vfio.MappedBuf.alloc(self.config.iova_asq_base, asq_size, flags, &self.vfio_container);
+        self.acq_body = try vfio.MappedBuf.alloc(self.config.iova_acq_base, acq_size, flags, &self.vfio_container);
         errdefer {
-            std.heap.page_allocator.free(asq_body);
-            std.heap.page_allocator.free(acq_body);
+            self.asq_body.?.free(&self.vfio_container) catch {};
+            self.acq_body.?.free(&self.vfio_container) catch {};
+            self.asq_body = null;
+            self.acq_body = null;
         }
-
-        // IOVA address for ASQ and ACQ by VFIO
-        const asq_dma_map = c.vfio_iommu_type1_dma_map{
-            .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
-            .vaddr = @intFromPtr(asq_body.ptr),
-            .iova = self.config.iova_asq_base,
-            .size = asq_body.len,
-            .flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
-        };
-        std.debug.print("asq_dma_map: {any}\n", .{asq_dma_map});
-        const asq_map_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_MAP_DMA, &asq_dma_map);
-        if (asq_map_ret < 0) {
-            const errno = std.posix.errno(-1);
-            try std.io.getStdErr().writer().print("VFIO_IOMMU_MAP_DMA failed: ret:{} errno:{}\n", .{ asq_map_ret, errno });
-            return error.VfioIommuMapDmaFailed;
-        }
-        const acq_dma_map = c.vfio_iommu_type1_dma_map{
-            .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
-            .vaddr = @intFromPtr(acq_body.ptr),
-            .iova = self.config.iova_acq_base,
-            .size = acq_size,
-            .flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
-        };
-        const acq_map_ret = c.ioctl(self.vfio_container_fd, c.VFIO_IOMMU_MAP_DMA, &acq_dma_map);
-        if (acq_map_ret < 0) {
-            const errno = std.posix.errno(-1);
-            try std.io.getStdErr().writer().print("VFIO_IOMMU_MAP_DMA failed: ret:{} errno:{}\n", .{ acq_map_ret, errno });
-            return error.VfioIommuMapDmaFailed;
-        }
-
         // set ASQ, ACQ, AQA
         self.ctrl_reg.aqa = AdminQueueAttributes{
             .asqs = admin_queue_depth,
@@ -305,10 +279,6 @@ const NvmDevice = struct {
                 return error.Timeout;
             }
         }
-
-        // ASQ and ACQ are now ready to use
-        self.asq_body = asq_body;
-        self.acq_body = acq_body;
     }
 };
 
@@ -524,7 +494,7 @@ pub fn main() !void {
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
     }
     var device = try NvmDevice.open(pci_addr, group_num, &config);
-    defer device.close();
+    defer device.close() catch {};
     device.resetController() catch |err| {
         if (err == error.Timeout) {
             try stderr.print("Controller reset timed out after {} seconds.\n", .{config.timeout_sec});
