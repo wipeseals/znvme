@@ -208,7 +208,7 @@ const NvmDevice = struct {
         };
         return ret;
     }
-    pub fn timeoutSec(self: *const NvmDevice) u32 {
+    fn timeoutSec(self: *const NvmDevice) u32 {
         if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
             return self.ctrl_reg.cap.to;
         } else {
@@ -220,8 +220,7 @@ const NvmDevice = struct {
         return (std.time.milliTimestamp() - start) > timeout_ms;
     }
     /// Controller Reset
-    /// Allocator must be set to std.heap.page_allocator.
-    pub fn resetController(self: *NvmDevice) !void {
+    pub fn reset(self: *NvmDevice) !void {
         // Check if the controller is already enabled
         if (self.asq_body) |_| {
             try self.asq_body.?.free(&self.vfio_container);
@@ -242,7 +241,9 @@ const NvmDevice = struct {
                 return error.Timeout;
             }
         }
+    }
 
+    pub fn enable(self: *NvmDevice) !void {
         // allocate ASQ and ACQ
         const admin_queue_depth = self.config.admin_queue_depth;
         const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
@@ -273,6 +274,26 @@ const NvmDevice = struct {
         const start_enable = std.time.milliTimestamp();
         while (self.ctrl_reg.csts.rdy != 1) {
             if (self.isTimeoutExceeded(start_enable)) {
+                return error.Timeout;
+            }
+        }
+    }
+
+    pub fn resetAndEnable(self: *NvmDevice) !void {
+        try self.reset(); // Reset the controller first
+        try self.enable(); // Then enable the controller
+    }
+
+    pub fn resetSubsystem(self: *NvmDevice) !void {
+        // CAP.NSSRS must be 1 to support NVM Subsystem Reset
+        if (self.ctrl_reg.cap.nssrs == 0) {
+            return error.NssrNotSupported;
+        }
+        // NVM Subsystem Reset
+        @atomicStore(u32, &self.ctrl_reg.nssr, 0x4e564d65, std.builtin.AtomicOrder.release); // "NVM" in ASCII
+        const start_reset = std.time.milliTimestamp();
+        while (self.ctrl_reg.csts.nssro == 0) {
+            if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
         }
@@ -485,7 +506,7 @@ pub fn main() !void {
     }
     var device = try NvmDevice.open(pci_addr, &config);
     defer device.close() catch {};
-    device.resetController() catch |err| {
+    device.resetAndEnable() catch |err| {
         if (err == error.Timeout) {
             try stderr.print("Controller reset timed out after {} seconds.\n", .{config.timeout_sec});
         } else {
