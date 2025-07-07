@@ -14,6 +14,7 @@ const c = @cImport({
 });
 
 const page_size_min = std.heap.page_size_min;
+const sleep_ns = 10; // 10ns
 
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...
@@ -250,6 +251,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
+            std.time.sleep(sleep_ns);
         }
     }
 
@@ -289,6 +291,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_enable)) {
                 return error.Timeout;
             }
+            std.time.sleep(sleep_ns);
         }
     }
 
@@ -309,6 +312,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
+            std.time.sleep(sleep_ns);
         }
     }
 
@@ -331,6 +335,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_shutdown)) {
                 return error.Timeout;
             }
+            std.time.sleep(sleep_ns);
         }
     }
 };
