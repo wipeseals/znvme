@@ -137,10 +137,6 @@ pub const SQEntry = packed struct {
     cdw14: u32, // Command Dword 14
     cdw15: u32, // Command Dword 15
 };
-test "Submission Queue Size" {
-    const size = @sizeOf(SQEntry);
-    try expect(size == 64); // 16 * u32 = 64 bytes
-}
 /// Submission Queue Dword 0 structure
 pub const SQDword0 = packed struct {
     opc: u8, // [7:0]  Opcode
@@ -169,6 +165,68 @@ pub const CQEntry = packed struct {
     more: u1, // More
     dnr: u1, // Do Not Retry
 };
+
+test "SQManage Creation and Push" {
+    const allocator = std.heap.page_allocator;
+    const depth = 16;
+    const buf_size = @sizeOf(SQEntry) * depth;
+    const buf = try allocator.alloc(u8, buf_size);
+    defer allocator.free(buf);
+
+    const sq_manage = try SQManage.create(depth, buf[0..]);
+    defer sq_manage.deinit();
+
+    try expect(sq_manage.depth == depth);
+    try expect(sq_manage.entries.len == depth);
+    try expect(sq_manage.isEmpty());
+    try expect(!sq_manage.isFull());
+
+    // push entry
+    const entry = SQEntry{
+        .cdw0 = SQDword0{
+            .opc = 0x01, // Example opcode
+            .fuse = 0,
+            ._rsvd0 = 0,
+            .psdt = 0,
+            .cid = 1, // Example command ID
+        },
+        .nsid = 1, // Example Namespace ID
+        .cdw2 = 0,
+        .cdw3 = 0,
+        .mptr = 0,
+        .dptr = SQDataPointer{
+            .prp1 = 0,
+            .prp2 = 0,
+        },
+        .cdw10 = 0,
+        .cdw11 = 0,
+        .cdw12 = 0,
+        .cdw13 = 0,
+        .cdw14 = 0,
+        .cdw15 = 0,
+    };
+    try sq_manage.pushTail(&entry);
+    try expect(!sq_manage.isEmpty());
+    try expect(sq_manage.count == 1);
+
+    // advance tail
+    try sq_manage.advanceTail(3);
+    try expect(sq_manage.tail == 4);
+    try expect(sq_manage.count == 4);
+
+    // sync to doorbell
+    var sq_doorbell: u64 = 0;
+    const pushed_count = try sq_manage.updateDoorbell(&sq_doorbell);
+    try expect(pushed_count == 4);
+    try expect(sq_manage.tail == 4);
+    try expect(sq_manage.count == 0); // count should be reset after update
+}
+
+test "Submission Queue Size" {
+    const size = @sizeOf(SQEntry);
+    try expect(size == 64); // 16 * u32 = 64 bytes
+}
+
 test "Completion Queue Size" {
     const size = @sizeOf(CQEntry);
     try expect(size == 16);
