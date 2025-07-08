@@ -76,6 +76,8 @@ const NvmDeviceConfig = struct {
     }
 };
 
+// TODO: IOVA Allocation Logic for Queue/Datas
+
 /// NVMe device structure
 const NvmDevice = struct {
     /// PCI address of the NVMe controller, e.g., "0000:00:1f.2"

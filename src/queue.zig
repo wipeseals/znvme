@@ -2,6 +2,27 @@ const std = @import("std");
 const expect = std.testing.expect;
 const page_size_min = std.heap.page_size_min;
 
+pub const QPair = struct {
+    /// Submission Queue Management
+    sq: SQManage,
+    /// Completion Queue Management
+    cq: CQManage,
+
+    pub fn create(
+        sq_depth: usize,
+        cq_depth: usize,
+        sq_buf: []align(page_size_min) u8,
+        cq_buf: []align(page_size_min) u8,
+        sq_tail_doorbell: *u64,
+        cq_head_doorbell: *u64,
+    ) !QPair {
+        return QPair{
+            .sq = try SQManage.create(sq_depth, sq_buf, sq_tail_doorbell),
+            .cq = try CQManage.create(cq_depth, cq_buf, cq_head_doorbell),
+        };
+    }
+};
+
 /// Queue control structure for managing submission and completion queues
 pub const SQManage = struct {
     /// tail pointer
@@ -12,10 +33,13 @@ pub const SQManage = struct {
     depth: usize = 0,
     /// body of the queue
     entries: []SQEntry = undefined,
+    /// Doorbell pointer
+    doorbell: *u64 = undefined,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
+        doorbell: *u64,
     ) !SQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(SQEntry) * d) {
@@ -27,6 +51,7 @@ pub const SQManage = struct {
             .count = 0,
             .depth = d,
             .entries = @ptrCast(buf),
+            .doorbell = doorbell,
         };
     }
 
@@ -92,10 +117,13 @@ pub const CQManage = struct {
     depth: usize = 0,
     /// body of the queue
     entries: []CQEntry = undefined,
+    /// Doorbell pointer
+    doorbell: *u64 = undefined,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
+        doorbell: *u64,
     ) !CQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(CQEntry) * d) {
@@ -107,6 +135,7 @@ pub const CQManage = struct {
             .count = 0,
             .depth = d,
             .entries = @ptrCast(buf),
+            .doorbell = doorbell,
         };
     }
 
