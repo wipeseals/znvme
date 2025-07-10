@@ -8,19 +8,20 @@ const c = @cImport({
     @cInclude("sys/mman.h");
 });
 
+// VFIO が Page alignedなメモリを要求するため、page_allocator固定
 const page_size_min = std.heap.page_size_min;
 const allocator = std.heap.page_allocator;
 
 /// Represents a mapping between an I/O Virtual Address (IOVA) and a buffer.
-pub const Map = struct {
+pub const DmaMap = struct {
     iova: u64,
     buf: []const u8,
     flags: c_uint,
     active: bool,
 
     /// Initializes and maps a new Map instance with the specified IOVA, buffer, and flags.
-    pub fn create(iova: u64, buf: []const u8, flags: c_uint, vfio: *Container) !Map {
-        var map = Map{
+    pub fn create(iova: u64, buf: []const u8, flags: c_uint, vfio: *Container) !DmaMap {
+        var map = DmaMap{
             .iova = iova,
             .buf = buf,
             .flags = flags,
@@ -31,32 +32,94 @@ pub const Map = struct {
     }
 
     /// Unmaps the DMA region associated with this Map instance.
-    pub fn delete(self: *Map, vfio: *Container) !void {
+    pub fn delete(self: *DmaMap, vfio: *Container) !void {
         if (!self.active) {
             return; // Already unmapped
         }
         try vfio.unmap_dma(self);
     }
 };
-pub const MappedBuf = struct {
+pub const DmaBuf = struct {
     buf: []align(page_size_min) u8,
-    map: Map,
+    map: DmaMap,
 
-    /// Initializes a new MappedBuf instance with the specified I/O Virtual Address (IOVA) and flags.
-    pub fn alloc(iova: u64, size: usize, flags: c_uint, vfio: *Container) !MappedBuf {
+    /// Initializes a new DmaBuf instance with the specified I/O Virtual Address (IOVA) and flags.
+    pub fn alloc(iova: u64, size: usize, flags: c_uint, vfio: *Container) !DmaBuf {
         const buf = try allocator.alignedAlloc(u8, page_size_min, size);
         errdefer allocator.free(buf);
-        const map = try Map.create(iova, buf, flags, vfio);
-        return MappedBuf{
+        const map = try DmaMap.create(iova, buf, flags, vfio);
+        return DmaBuf{
             .buf = buf,
             .map = map,
         };
     }
 
     /// Opens the mapping for the specified I/O Virtual Address (IOVA) and flags.
-    pub fn free(self: *MappedBuf, vfio: *Container) !void {
+    pub fn free(self: *DmaBuf, vfio: *Container) !void {
         try self.map.delete(vfio);
         allocator.free(self.buf);
+    }
+};
+
+pub const DmaBufPoolEntry = struct {
+    buf: []align(page_size_min) u8,
+    iova: u64,
+    page_index: usize,
+    page_count: usize,
+};
+
+pub const DmaBufPool = struct {
+    dma_buf: DmaBuf,
+    free_bitset: std.StaticBitSet,
+
+    /// Initializes a new DmaBufPool with the specified I/O Virtual Address (IOVA) and flags.
+    pub fn init(iova: u64, size: usize, flags: c_uint, vfio: *Container) !DmaBufPool {
+        const dma_buf = try DmaBuf.alloc(iova, size, flags, vfio);
+        const free_bitset = std.StaticBitSet(size / page_size_min).initFull();
+        return DmaBufPool{
+            .dma_buf = dma_buf,
+            .free_bitset = free_bitset,
+        };
+    }
+
+    /// Allocates a new buffer from the pool.
+    pub fn alloc(self: *DmaBufPool, size: usize) !DmaBufPoolEntry {
+        // align size to page size
+        const aligned_size = util.alignUp(size, page_size_min);
+        const page_count = aligned_size / page_size_min;
+        // find a free page in the bitmap
+        const alloc_page_index = util.findNConsecutiveOnes(self.free_bitset, page_count) orelse {
+            return error.NoFreePage; // No free page available
+        };
+        // mark the page as used
+        self.free_bitset.setValue(alloc_page_index, false);
+        // calculate the IOVA and buffer pointer
+        const iova = alloc_page_index * page_size_min + self.dma_buf.map.iova;
+        const buf_ptr = self.dma_buf.buf[alloc_page_index * page_size_min .. (alloc_page_index + 1) * page_size_min];
+        return DmaBufPoolEntry{
+            .buf = buf_ptr,
+            .iova = iova,
+            .page_index = alloc_page_index, // for freeing later
+            .page_count = page_count, // number of pages allocated
+        };
+    }
+
+    /// Frees a previously allocated buffer back to the pool.
+    pub fn free(self: *DmaBufPool, entry: *const DmaBufPoolEntry) void {
+        const free_page_index = entry.page_index;
+        if (self.free_bitset.isSet(free_page_index)) {
+            return error.PageAlreadyFree; // Page is already free
+        }
+        // mark the pages as free in the bitmap
+        for (0..entry.page_count) |i| {
+            self.free_bitset.setValue(free_page_index + i, true);
+        }
+    }
+
+    /// Frees the resources associated with this DmaBufPool.
+    pub fn deinit(self: *DmaBufPool, vfio: *Container) !void {
+        try self.dma_buf.free(vfio);
+        self.free_bitset.deinit(allocator);
     }
 };
 
@@ -169,7 +232,7 @@ pub const Container = struct {
     /// Maps a DMA region for the specified I/O Virtual Address (IOVA) and data.
     pub fn map_dma(
         self: *Container,
-        map: *Map,
+        map: *DmaMap,
     ) !void {
         const dma_map = c.vfio_iommu_type1_dma_map{
             .argsz = @sizeOf(c.vfio_iommu_type1_dma_map),
@@ -188,7 +251,7 @@ pub const Container = struct {
     /// Unmaps a DMA region for the specified I/O Virtual Address (IOVA).
     pub fn unmap_dma(
         self: *Container,
-        map: *Map,
+        map: *DmaMap,
     ) !void {
         const dma_unmap = c.vfio_iommu_type1_dma_unmap{
             .argsz = @sizeOf(c.vfio_iommu_type1_dma_unmap),
