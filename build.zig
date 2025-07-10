@@ -118,4 +118,11 @@ pub fn build(b: *std.Build) void {
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_lib_unit_tests.step);
     test_step.dependOn(&run_exe_unit_tests.step);
+
+    // Creates a step for generating documentation. This will generate documentation
+    const doc_step = b.step("doc", "Generate documentation");
+    const doc_exe_artifact = b.addInstallArtifact(exe, .{});
+    const doc_lib_artifact = b.addInstallArtifact(lib, .{});
+    doc_step.dependOn(&doc_exe_artifact.step);
+    doc_step.dependOn(&doc_lib_artifact.step);
 }
