@@ -24,20 +24,14 @@ pub fn alignDown(value: usize, alignment: usize) usize {
 }
 
 pub fn findNConsecutiveOnes(
-    comptime BitSetSize: usize,
-    bitset: std.StaticBitSet(BitSetSize),
-    n: u32, // 探したい連続ビット数
+    bitset: std.DynamicBitSet,
+    n: usize, // 探したい連続ビット数
 ) ?u32 {
-    // nが0またはビットセットのサイズを超える場合はありえない
-    if (n == 0 or n > BitSetSize) {
-        return null;
-    }
-
     var cons_free: u32 = 0;
     var cons_start: u32 = undefined;
     var bit_idx: u32 = 0;
     // search for n consecutive free(1) in the bitset
-    while (bit_idx < BitSetSize) : (bit_idx += 1) {
+    while (bit_idx < bitset.capacity()) : (bit_idx += 1) {
         if (bitset.isSet(bit_idx)) {
             if (cons_free == 0) {
                 // 連続が始まった位置を記録

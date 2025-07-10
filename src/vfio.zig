@@ -70,12 +70,12 @@ pub const DmaBufPoolEntry = struct {
 
 pub const DmaBufPool = struct {
     dma_buf: DmaBuf,
-    free_bitset: std.StaticBitSet,
+    free_bitset: std.DynamicBitSet,
 
     /// Initializes a new DmaBufPool with the specified I/O Virtual Address (IOVA) and flags.
     pub fn init(iova: u64, size: usize, flags: c_uint, vfio: *Container) !DmaBufPool {
         const dma_buf = try DmaBuf.alloc(iova, size, flags, vfio);
-        const free_bitset = std.StaticBitSet(size / page_size_min).initFull();
+        const free_bitset = try std.DynamicBitSet.initFull(allocator, size / page_size_min);
         return DmaBufPool{
             .dma_buf = dma_buf,
             .free_bitset = free_bitset,
@@ -95,7 +95,7 @@ pub const DmaBufPool = struct {
         self.free_bitset.setValue(alloc_page_index, false);
         // calculate the IOVA and buffer pointer
         const iova = alloc_page_index * page_size_min + self.dma_buf.map.iova;
-        const buf_ptr = self.dma_buf.buf[alloc_page_index * page_size_min .. (alloc_page_index + 1) * page_size_min];
+        const buf_ptr: []align(page_size_min) u8 = @alignCast(self.dma_buf.buf[alloc_page_index * page_size_min .. (alloc_page_index + 1) * page_size_min]);
         return DmaBufPoolEntry{
             .buf = buf_ptr,
             .iova = iova,
@@ -105,7 +105,7 @@ pub const DmaBufPool = struct {
     }
 
     /// Frees a previously allocated buffer back to the pool.
-    pub fn free(self: *DmaBufPool, entry: *const DmaBufPoolEntry) void {
+    pub fn free(self: *DmaBufPool, entry: *const DmaBufPoolEntry) !void {
         const free_page_index = entry.page_index;
         if (self.free_bitset.isSet(free_page_index)) {
             return error.PageAlreadyFree; // Page is already free
@@ -118,8 +118,8 @@ pub const DmaBufPool = struct {
 
     /// Frees the resources associated with this DmaBufPool.
     pub fn deinit(self: *DmaBufPool, vfio: *Container) !void {
+        self.free_bitset.deinit();
         try self.dma_buf.free(vfio);
-        self.free_bitset.deinit(allocator);
     }
 };
 

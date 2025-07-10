@@ -1,24 +1,51 @@
 const std = @import("std");
 const expect = std.testing.expect;
 const page_size_min = std.heap.page_size_min;
+const vfio = @import("vfio.zig"); // 汎用化を目指すならvfio.DmaBufPool からvfioの依存性を切れるようにする
+const util = @import("util.zig");
 
 pub const QPair = struct {
-    /// Submission Queue Management
     sq: SQManage,
-    /// Completion Queue Management
     cq: CQManage,
+    sq_body: vfio.DmaBufPoolEntry,
+    cq_body: vfio.DmaBufPoolEntry,
 
     pub fn create(
         sq_depth: usize,
         cq_depth: usize,
-        sq_buf: []align(page_size_min) u8,
-        cq_buf: []align(page_size_min) u8,
-        sq_tail_doorbell: *u64,
-        cq_head_doorbell: *u64,
+        doorbell: *const Doorbell,
+        dma_pool: *vfio.DmaBufPool,
     ) !QPair {
+        const sq_size = util.alignUp(sq_depth * @sizeOf(SQEntry), page_size_min);
+        const cq_size = util.alignUp(cq_depth * @sizeOf(CQEntry), page_size_min);
+        // Allocate buffers for submission and completion queues
+        const sq_body = try dma_pool.alloc(sq_size);
+        const cq_body = try dma_pool.alloc(cq_size);
+
         return QPair{
-            .sq = try SQManage.create(sq_depth, sq_buf, sq_tail_doorbell),
-            .cq = try CQManage.create(cq_depth, cq_buf, cq_head_doorbell),
+            .sq = try SQManage.create(sq_depth, sq_body.buf, doorbell.sq),
+            .cq = try CQManage.create(cq_depth, cq_body.buf, doorbell.cq),
+            .sq_body = sq_body,
+            .cq_body = cq_body,
+        };
+    }
+
+    pub fn delete(self: *QPair, dma_pool: *vfio.DmaBufPool) !void {
+        try dma_pool.free(&self.sq_body);
+        try dma_pool.free(&self.cq_body);
+    }
+};
+
+pub const Doorbell = struct {
+    /// Submission Queue Doorbell Pointer
+    sq: *volatile u32,
+    /// Completion Queue Doorbell Pointer
+    cq: *volatile u32,
+
+    pub fn init(sq: *volatile u32, cq: *volatile u32) Doorbell {
+        return Doorbell{
+            .sq = sq,
+            .cq = cq,
         };
     }
 };
@@ -34,12 +61,12 @@ pub const SQManage = struct {
     /// body of the queue
     entries: []SQEntry = undefined,
     /// Doorbell pointer
-    doorbell: *u64 = undefined,
+    doorbell: *volatile u32 = undefined,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
-        doorbell: *u64,
+        doorbell: *volatile u32,
     ) !SQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(SQEntry) * d) {
@@ -118,12 +145,12 @@ pub const CQManage = struct {
     /// body of the queue
     entries: []CQEntry = undefined,
     /// Doorbell pointer
-    doorbell: *u64 = undefined,
+    doorbell: *volatile u32 = undefined,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
-        doorbell: *u64,
+        doorbell: *volatile u32,
     ) !CQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(CQEntry) * d) {
