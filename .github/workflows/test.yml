@@ -12,9 +12,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Read Zig version
+        id: zig-version
+        run: echo "version=$(cat .zigversion)" >> $GITHUB_OUTPUT
       - name: Set up Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: master
+          version: ${{ steps.zig-version.outputs.version }}
       - name: Run zig build test
         run: zig build test
