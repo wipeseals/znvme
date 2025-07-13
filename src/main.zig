@@ -16,6 +16,9 @@ const c = @cImport({
 
 const page_size_min = std.heap.page_size_min;
 
+const stdout = std.io.getStdOut().writer();
+const stderr = std.io.getStdErr().writer();
+
 /// Device status enumeration
 const DeviceStatus = enum {
     /// EN = 0, RDY = *, SHN = 0, SHST = 0, CFS = 0
@@ -108,6 +111,9 @@ const NvmDevice = struct {
         // Map the controller registers from BAR0
         const ctrl_reg: *volatile ControllerRegister = @ptrCast(vfio_container.bar0_map);
         if (!ctrl_reg.isValid()) {
+            stderr.print("Controller Register is not valid.\n", .{}) catch {};
+            util.printHexdump(stderr, vfio_container.bar0_map, @sizeOf(ControllerRegister)) catch {};
+            stderr.print("Controller Register {}\n", .{ctrl_reg.*}) catch {};
             return error.InvalidControllerRegister;
         }
         // Allocate DMA buffer pools for queues and data
@@ -508,9 +514,6 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
-
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
 
     // コマンドライン引数を取得
     const params = comptime clap.parseParamsComptime(
