@@ -128,7 +128,7 @@ pub const SQManage = struct {
 
     pub fn advanceTail(self: *SQManage, num: usize) !void {
         // Ensure the tail is within bounds
-        if ((self.stagedCount + num) >= self.depth) {
+        if ((self.stagedCount + num) > self.depth) {
             return error.QueueFull;
         }
         // Adjust the tail pointer with wrap-around
