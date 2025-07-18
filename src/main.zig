@@ -175,8 +175,27 @@ const NvmDevice = struct {
     }
 
     /// print hexdump of the controller registers.
-    pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
+    pub fn printCtrlRegs(self: *const NvmDevice, writer: anytype) !void {
         try util.printHexdump(writer, self.vfio_container.bar0_map, @sizeOf(ControllerRegister));
+    }
+
+    pub fn printAdminQueue(self: *const NvmDevice, writer: anytype) !void {
+        if (self.admin_queue) |q| {
+            try writer.print("Admin Submission Queue", .{});
+            try util.printHexdump(writer, q.sq_body.buf, q.sq_body.buf.len);
+            try writer.print("Admin Completion Queue", .{});
+            try util.printHexdump(writer, q.cq_body.buf, q.cq_body.buf.len);
+            try self.printDoorbell(writer, 1);
+        } else {
+            try writer.print("Admin Queue is not initialized.\n", .{});
+        }
+    }
+
+    pub fn printDoorbell(self: *const NvmDevice, writer: anytype, queue_id: u32) !void {
+        const doorbell = try self.doorbellPtr(queue_id);
+        try writer.print("Doorbell for Queue {d}:\n", .{queue_id});
+        try writer.print("  SQ: {}(@0x{x})\n", .{doorbell.sq.*, @intFromPtr(doorbell.sq)});
+        try writer.print("  CQ: {}(@0x{x})\n", .{doorbell.cq.*, @intFromPtr(doorbell.cq)});
     }
 
     /// Get the status of the NVM device based on the controller registers.
@@ -548,10 +567,10 @@ pub fn main() !void {
         try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
     }
 
-    try device.shutdown(ShutdownNotification.normal);
-    if (verbose) {
-        try stdout.print("[Post-Shutdown] Current status: {}\n", .{device.status()});
-    }
+    // try device.shutdown(ShutdownNotification.normal);
+    // if (verbose) {
+    //     try stdout.print("[Post-Shutdown] Current status: {}\n", .{device.status()});
+    // }
 
     if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
@@ -562,7 +581,7 @@ pub fn main() !void {
             device.status(),
         });
         try stdout.print("Controller Register Raw:", .{});
-        try device.printRaw(stdout);
+        try device.printCtrlRegs(stdout);
 
         try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
@@ -594,7 +613,10 @@ pub fn main() !void {
         return error.AdminQueueNotInitialized;
     };
     try aq.pushToSq(&identify, true);
-    const cq_entry = try aq.pullFromCq(config.timeout_sec);
+    const cq_entry = aq.pullFromCq(config.timeout_sec * 1000) catch |err| {
+        device.printAdminQueue(stderr) catch {};
+        return err;
+    };
     try stdout.print("CQ Entry: {any}\n", .{cq_entry});
     try util.printHexdump(stdout, identify_buf.buf, identify_buf.buf.len);
 }
