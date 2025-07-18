@@ -194,8 +194,8 @@ const NvmDevice = struct {
     pub fn printDoorbell(self: *const NvmDevice, writer: anytype, queue_id: u32) !void {
         const doorbell = try self.doorbellPtr(queue_id);
         try writer.print("Doorbell for Queue {d}:\n", .{queue_id});
-        try writer.print("  SQ: {}(@0x{x})\n", .{doorbell.sq.*, @intFromPtr(doorbell.sq)});
-        try writer.print("  CQ: {}(@0x{x})\n", .{doorbell.cq.*, @intFromPtr(doorbell.cq)});
+        try writer.print("  SQ: {}(@0x{x})\n", .{ doorbell.sq.*, @intFromPtr(doorbell.sq) });
+        try writer.print("  CQ: {}(@0x{x})\n", .{ doorbell.cq.*, @intFromPtr(doorbell.cq) });
     }
 
     /// Get the status of the NVM device based on the controller registers.
