@@ -332,24 +332,6 @@ const NvmDevice = struct {
             .cq = @ptrCast(cq_doorbell_ptr),
         };
     }
-
-    pub fn pushAdminCmd(self: *NvmDevice, cmd: *const queue.SQEntry) !void {
-        // Check if the Controller is enabled and ready
-        if (self.status() != DeviceStatus.Enabled) {
-            try self.resetAndEnable();
-        }
-        // Push the command to the ASQ
-        try self.asq.pushTail(&cmd);
-    }
-
-    pub fn updateAsqDoorbell(self: *NvmDevice) !usize {
-        // Check if the Controller is enabled and ready
-        if (self.status() != DeviceStatus.Enabled) {
-            return error.ControllerNotReady;
-        }
-        const pushed_count = try self.asq.updateDoorbell(&self.ctrl_reg.asq);
-        return pushed_count;
-    }
 };
 
 const ControllerRegister = packed struct {
@@ -586,4 +568,31 @@ pub fn main() !void {
 
         try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
+
+    // TEST: Create Identify Command
+    const identify_size = 4 * 1024; // 4 KiB for Identify Command
+    const identify_buf = try device.buf_pool_data.alloc(identify_size);
+    const data_ptr, _ = try queue.SQDataPointer.init(identify_buf.iova, identify_size, null);
+    const identify = queue.SQEntry{
+        .cdw0 = queue.SQDword0{
+            .opc = queue.AdminOpcode.identify,
+            .fuse = queue.FusedOperation.none,
+            .psdt = queue.SQDataPointerType.prp,
+            .cid = 0xabcd, // Command Identifier
+        },
+        .nsid = 0x1,
+        .cdw2 = 0, // Command Dword 2
+        .cdw3 = 0, // Command Dword 3
+        .mptr = 0, // Metadata Pointer (not used for Identify Command)
+        .dptr = data_ptr, // Data Pointer
+        .cdw10 = queue.Cdw10Identify{
+            .cns = queue.ControllerNamespace.controller,
+            ._rsvd = 0,
+            .cntid = 0x0,
+        },
+    };
+    var aq = device.admin_queue orelse {
+        return error.AdminQueueNotInitialized;
+    };
+    try aq.push(&identify);
 }

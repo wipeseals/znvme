@@ -34,6 +34,10 @@ pub const QPair = struct {
         try dma_pool.free(&self.sq_body);
         try dma_pool.free(&self.cq_body);
     }
+
+    pub fn push(self: *QPair, entry: *const SQEntry) !void {
+        try self.sq.pushTail(entry);
+    }
 };
 
 pub const Doorbell = struct {
@@ -62,6 +66,8 @@ pub const SQManage = struct {
     entries: []SQEntry = undefined,
     /// Doorbell pointer
     doorbell: *volatile u32 = undefined,
+    /// head pointer (sync CQ.SQHD)
+    head: usize = 0,
 
     pub fn create(
         d: usize,
@@ -90,7 +96,7 @@ pub const SQManage = struct {
         return self.count == 0;
     }
 
-    pub fn tailPtr(self: *const SQManage, offset: usize) *SQEntry {
+    pub fn tailPtr(self: *const SQManage, offset: usize) !*SQEntry {
         // Ensure the tail is within bounds
         if ((self.count + offset) >= self.depth) {
             return error.QueueFull;
@@ -115,7 +121,7 @@ pub const SQManage = struct {
             return error.QueueFull;
         }
         // Get the tail pointer and copy the entry
-        const tail_ptr = self.tailPtr(0);
+        const tail_ptr = try self.tailPtr(0);
         tail_ptr.* = entry.*;
         // Arrange the tail pointer
         try self.advanceTail(1);
@@ -177,35 +183,126 @@ pub const CQManage = struct {
     // TODO: sync cqhdbl
 };
 
+/// Admin Opcodes
+pub const AdminOpcode = enum(u8) {
+    /// Identify Command
+    identify = 0x06,
+};
+
+pub const ControllerNamespace = enum(u8) {
+    namespace = 0x00,
+    controller = 0x01,
+    activeNameSpaceIdList = 0x02,
+    namespaceIdentificationDescriptor = 0x03,
+    nvmSetList = 0x04,
+    ioCmdSetListSpecificIdentifyNamespace = 0x05,
+    ioCmdSetSpecificIdentifyController = 0x06,
+    // TODO: Other Figure 310: Identify - CNS Values
+};
+/// Command Dword 10 for Identify Command
+pub const Cdw10Identify = packed struct {
+    /// Controller or Namespace Structure
+    cns: ControllerNamespace,
+    /// reserved
+    _rsvd: u8 = 0,
+    /// Controller Identifier
+    cntid: u16 = 0,
+};
+
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...
 pub const SQEntry = packed struct {
     cdw0: SQDword0, // Submission Queue Dword 0
-    nsid: u32, // Namespace Identifier
-    cdw2: u32, // Command Dword 2
-    cdw3: u32, // Command Dword 3
-    mptr: u32, // Metadata Pointer
+    nsid: u32 = 0xffffffff, // Namespace Identifier
+    cdw2: u32 = 0x0, // Command Dword 2
+    cdw3: u32 = 0x0, // Command Dword 3
+    mptr: u32 = 0x0, // Metadata Pointer
     dptr: SQDataPointer, // Data Pointer
-    cdw10: u32, // Command Dword 10
-    cdw11: u32, // Command Dword 11
-    cdw12: u32, // Command Dword 12
-    cdw13: u32, // Command Dword 13
-    cdw14: u32, // Command Dword 14
-    cdw15: u32, // Command Dword 15
+    cdw10: Cdw10Identify, // Command Dword 10
+    cdw11: u32 = 0x0, // Command Dword 11
+    cdw12: u32 = 0x0, // Command Dword 12
+    cdw13: u32 = 0x0, // Command Dword 13
+    cdw14: u32 = 0x0, // Command Dword 14
+    cdw15: u32 = 0x0, // Command Dword 15
+};
+
+pub const FusedOperation = enum(u2) {
+    /// No Fused Operation
+    none = 0,
+    /// First Command of Fused Operation
+    firstCommandOfFused = 1,
+    /// Second Command of Fused Operation
+    secondCommandOfFused = 2,
+    _reserved = 3,
+};
+
+/// Submission Queue Data Pointer Type
+pub const SQDataPointerType = enum(u2) {
+    /// PRP Entry
+    prp = 0,
+    /// SGL Entry
+    sglUsedMptrAddr = 1,
+    /// SGL Entry
+    sglUsedMptrSqlSeg = 2,
+    /// reserved
+    _reserved = 3,
 };
 /// Submission Queue Dword 0 structure
 pub const SQDword0 = packed struct {
-    opc: u8, // [7:0]  Opcode
-    fuse: u2, // [9:8]  Fused Operation
-    _rsvd0: u4, // [13:10] Reserved
-    psdt: u2, // [15:14] PRP or SGL Data Transfer
-    cid: u16, // [31:16] Command Identifier
+    opc: AdminOpcode, // [7:0]  Opcode
+    fuse: FusedOperation = FusedOperation.none, // [9:8]  Fused Operation
+    _rsvd0: u4 = 0, // [13:10] Reserved
+    psdt: SQDataPointerType = SQDataPointerType.prp, // [15:14] PRP or SGL Data Transfer
+    cid: u16 = 0, // [31:16] Command Identifier
 };
 /// Completion Queue structure
 /// TODO: SGL support
 pub const SQDataPointer = packed struct {
-    prp1: u32, // [31:0] PRP Entry 1
-    prp2: u32, // [63:32] PRP Entry 2
+    prp1: u64,
+    prp2: u64,
+
+    /// Create a SQDataPointer from an I/O Virtual Address (IOVA) and transfer size
+    pub fn init(iova: u64, transfer_size: usize, dma_pool: ?*vfio.DmaBufPool) !struct { SQDataPointer, ?vfio.DmaBufPoolEntry } {
+        const prp1 = iova;
+
+        if (transfer_size <= page_size_min) {
+            // Case.1: Single PRP Entry
+            return .{ SQDataPointer{
+                .prp1 = prp1,
+                .prp2 = 0,
+            }, null };
+        } else {
+            const offset = iova % page_size_min;
+            const size_in_first_page = page_size_min - offset;
+            const remain_size = transfer_size - size_in_first_page;
+
+            if (remain_size <= page_size_min) {
+                // Case.2: Two PRP Entries
+                const prp2 = iova + size_in_first_page; // Next Page Head
+                return .{ SQDataPointer{
+                    .prp1 = prp1,
+                    .prp2 = prp2,
+                }, null };
+            } else {
+                // Case.3: Multiple PRP Entries (need PRP List)
+                const pool = dma_pool orelse return error.NoDmaBufPool;
+                // PRP1 = iova, PRP2 = PRP List Head IOVA, PRP List = {PRP2, PRP3, ...}
+                const prp_entry_num = util.alignUp(remain_size, page_size_min) / page_size_min - 1;
+                const prp_list_buf = try pool.alloc(remain_size);
+                var prp_list_entries: []u64 = @ptrCast(prp_list_buf.buf);
+                for (0..prp_entry_num) |i| {
+                    const prp_offset = (1 + i) * page_size_min;
+                    const prp_iova = prp_list_buf.iova + prp_offset;
+                    prp_list_entries[i] = prp_iova;
+                }
+                const prp2 = prp_list_buf.iova;
+                return .{ SQDataPointer{
+                    .prp1 = prp1,
+                    .prp2 = prp2,
+                }, prp_list_buf };
+            }
+        }
+    }
 };
 
 pub const CQEntry = packed struct {
