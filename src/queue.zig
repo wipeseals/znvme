@@ -4,6 +4,10 @@ const page_size_min = std.heap.page_size_min;
 const vfio = @import("vfio.zig"); // 汎用化を目指すならvfio.DmaBufPool からvfioの依存性を切れるようにする
 const util = @import("util.zig");
 
+/// Maximum queue depth for submission and completion queues
+/// TODO: 完全に可変長を実現するなら DynamicBitSet に置き換え
+pub const MAX_QUEUE_DEPTH: usize = 128;
+
 pub const QPair = struct {
     sq: SQManage,
     cq: CQManage,
@@ -58,8 +62,10 @@ pub const Doorbell = struct {
 pub const SQManage = struct {
     /// tail pointer
     tail: usize = 0,
-    /// number of entries
-    count: usize = 0,
+    /// number of staged entries
+    stagedCount: usize = 0,
+    /// number of pushed entries
+    pushedCount: usize = 0,
     /// Maximum depth of the queue
     depth: usize = 0,
     /// body of the queue
@@ -67,7 +73,7 @@ pub const SQManage = struct {
     /// Doorbell pointer
     doorbell: *volatile u32 = undefined,
     /// head pointer (sync CQ.SQHD)
-    head: usize = 0,
+    head_synced: usize = 0,
 
     pub fn create(
         d: usize,
@@ -81,24 +87,26 @@ pub const SQManage = struct {
         // create the queue structure
         return SQManage{
             .tail = 0,
-            .count = 0,
+            .stagedCount = 0,
+            .pushedCount = 0,
             .depth = d,
             .entries = @ptrCast(buf),
             .doorbell = doorbell,
+            .head_synced = 0,
         };
     }
 
     pub fn isFull(self: *const SQManage) bool {
-        return self.count >= self.depth;
+        return (self.stagedCount + self.pushedCount) >= self.depth;
     }
 
     pub fn isEmpty(self: *const SQManage) bool {
-        return self.count == 0;
+        return (self.stagedCount + self.pushedCount) == 0;
     }
 
     pub fn tailPtr(self: *const SQManage, offset: usize) !*SQEntry {
         // Ensure the tail is within bounds
-        if ((self.count + offset) >= self.depth) {
+        if ((self.stagedCount + offset) >= self.depth) {
             return error.QueueFull;
         }
         // Calculate the tail pointer with wrap-around
@@ -108,12 +116,12 @@ pub const SQManage = struct {
 
     pub fn advanceTail(self: *SQManage, num: usize) !void {
         // Ensure the tail is within bounds
-        if ((self.count + num) >= self.depth) {
+        if ((self.stagedCount + num) >= self.depth) {
             return error.QueueFull;
         }
         // Adjust the tail pointer with wrap-around
         self.tail = (self.tail + num) % self.depth;
-        self.count += num;
+        self.stagedCount += num;
     }
 
     pub fn pushTail(self: *SQManage, entry: *const SQEntry) !void {
@@ -127,31 +135,44 @@ pub const SQManage = struct {
         try self.advanceTail(1);
     }
 
-    pub fn updateDoorbell(self: *SQManage, sq_doorbell: *u64) !usize {
+    pub fn syncSQDoorbell(self: *SQManage, sq_doorbell: *u64) !usize {
         // Ensure the queue is not empty before updating the doorbell
         if (self.isEmpty()) {
             return error.QueueEmpty;
         }
         // Update the tail pointer in the doorbell
         @atomicStore(u32, &sq_doorbell, @intCast(self.tail), std.builtin.AtomicOrder.release);
-        // clear the count
-        const old_count = self.count;
-        self.count = 0;
-        return old_count; // Return the number of entries that were pushed
+        // clear the staged count
+        const stagedCount = self.stagedCount;
+        self.pushedCount += stagedCount;
+        self.stagedCount = 0;
+        return stagedCount; // Return the number of entries that were pushed
+    }
+
+    pub fn syncCQHead(self: *SQManage, cq_head: usize) !void {
+        // CQHDBL is the head pointer of the completion queue
+        const resp_count = (cq_head - self.head_synced) % self.depth;
+        self.head_synced = cq_head;
+        if (resp_count > self.stagedCount) {
+            return error.TooManyResponses;
+        } else {
+            // Adjust staged count based on the response count
+            self.stagedCount -= resp_count;
+        }
     }
 };
 
 pub const CQManage = struct {
     /// head pointer
     head: usize = 0,
-    /// number of entries
-    count: usize = 0,
     /// Maximum depth of the queue
     depth: usize = 0,
     /// body of the queue
     entries: []CQEntry = undefined,
     /// Doorbell pointer
     doorbell: *volatile u32 = undefined,
+    /// Phase Tags
+    phasetags: std.StaticBitSet(MAX_QUEUE_DEPTH) = undefined,
 
     pub fn create(
         d: usize,
@@ -162,25 +183,75 @@ pub const CQManage = struct {
         if (buf.len < @sizeOf(CQEntry) * d) {
             return error.BufferTooSmall;
         }
+        // Clear all phase tags in the buffer
+        const entries: []CQEntry = @ptrCast(buf);
+        for (entries) |*entry| {
+            entry.p = 0; // Clear Phase Tag
+        }
         // create the queue structure
         return CQManage{
             .head = 0,
-            .count = 0,
             .depth = d,
-            .entries = @ptrCast(buf),
+            .entries = entries,
             .doorbell = doorbell,
+            .phasetags = std.StaticBitSet(MAX_QUEUE_DEPTH).initEmpty(),
         };
     }
 
-    pub fn isFull(self: *const CQManage) bool {
-        return self.count >= self.depth;
+    pub fn headPtr(self: *const CQManage, offset: usize) *const CQEntry {
+        const head_index = (self.head + offset) % self.depth;
+        return &self.entries[head_index];
     }
 
-    pub fn isEmpty(self: *const CQManage) bool {
-        return self.count == 0;
+    /// Check phase tag validity
+    pub fn isActiveEntry(self: *const CQManage, offset: usize) bool {
+        const entry_ptr = self.headPtr(offset);
+        const current_phase = entry_ptr.p;
+        const prev_phase = self.phasetags.get(offset) orelse false;
+        return current_phase != prev_phase;
     }
 
-    // TODO: sync cqhdbl
+    /// Wait for the completion queue to have at least one entry
+    pub fn waitComplete(self: *CQManage, timeout: std.time.Duration) !*const CQEntry {
+        const start_time = std.time.milliTimestamp();
+        while (!self.isActiveEntry(0)) {
+            if (std.time.milliTimestamp() - start_time >= timeout) {
+                return error.Timeout; // Timeout waiting for completion
+            }
+            std.time.sleep(1 * std.time.millisecond); // Sleep for a short duration
+        }
+        // Return the head pointer of the completion queue
+        const entry_ptr = self.headPtr(0);
+        return entry_ptr;
+    }
+
+    /// check all phase tags to count active entries
+    pub fn remainCount(self: *const CQManage) usize {
+        var count: usize = 0;
+        for (0..self.depth) |i| {
+            if (self.isActiveEntry(i)) {
+                count += 1;
+            }
+        }
+        return count;
+    }
+
+    /// Advance the head pointer and update phase tags
+    pub fn advanceHead(self: *CQManage, num: usize) !void {
+        // Ensure the head pointer does not exceed the depth
+        if (num > self.depth) {
+            return error.QueueFull;
+        }
+        // Update the head pointer with wrap-around
+        for (0..num) |i| {
+            const index = (self.head + i) % self.depth;
+            const entry_ptr = self.headPtr(i);
+            // Update the phase tag for the entry
+            self.phasetags.setValue(index, entry_ptr.p);
+        }
+        // Update the head pointer
+        self.head = (self.head + num) % self.depth;
+    }
 };
 
 /// Admin Opcodes
@@ -360,19 +431,19 @@ test "SQManage Creation and Push" {
     };
     try sq_manage.pushTail(&entry);
     try expect(!sq_manage.isEmpty());
-    try expect(sq_manage.count == 1);
+    try expect(sq_manage.stagedCount == 1);
 
     // advance tail
     try sq_manage.advanceTail(3);
     try expect(sq_manage.tail == 4);
-    try expect(sq_manage.count == 4);
+    try expect(sq_manage.stagedCount == 4);
 
     // sync to doorbell
     var sq_doorbell: u64 = 0;
-    const pushed_count = try sq_manage.updateDoorbell(&sq_doorbell);
+    const pushed_count = try sq_manage.syncSQDoorbell(&sq_doorbell);
     try expect(pushed_count == 4);
     try expect(sq_manage.tail == 4);
-    try expect(sq_manage.count == 0); // count should be reset after update
+    try expect(sq_manage.stagedCount == 0); // count should be reset after update
 }
 
 test "Submission Queue Size" {
