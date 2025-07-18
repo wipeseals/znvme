@@ -39,18 +39,30 @@ pub const QPair = struct {
         try dma_pool.free(&self.cq_body);
     }
 
-    pub fn push(self: *QPair, entry: *const SQEntry) !void {
-        try self.sq.pushTail(entry);
+    /// Push an entry to the submission queue
+    /// TODO: High Throughput APIs
+    pub fn pushToSq(self: *QPair, entry: *const SQEntry, sync_doorbell: bool) !void {
+        try self.sq.pushTail(entry, sync_doorbell);
+    }
+
+    /// Pull an entry from the completion queue
+    pub fn pullFromCq(self: *QPair, timeout_ms: u32) !*const CQEntry {
+        const entry = try self.cq.waitComplete(timeout_ms);
+        try self.cq.advanceHead(1, true);
+        // sync sq head
+        _ = try self.sq.syncCQHead(self.cq.head);
+
+        return entry;
     }
 };
 
 pub const Doorbell = struct {
     /// Submission Queue Doorbell Pointer
-    sq: *volatile u32,
+    sq: *u32,
     /// Completion Queue Doorbell Pointer
-    cq: *volatile u32,
+    cq: *u32,
 
-    pub fn init(sq: *volatile u32, cq: *volatile u32) Doorbell {
+    pub fn init(sq: *u32, cq: *u32) Doorbell {
         return Doorbell{
             .sq = sq,
             .cq = cq,
@@ -71,14 +83,14 @@ pub const SQManage = struct {
     /// body of the queue
     entries: []SQEntry = undefined,
     /// Doorbell pointer
-    doorbell: *volatile u32 = undefined,
+    doorbell: *u32 = undefined,
     /// head pointer (sync CQ.SQHD)
     head_synced: usize = 0,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
-        doorbell: *volatile u32,
+        doorbell: *u32,
     ) !SQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(SQEntry) * d) {
@@ -124,7 +136,7 @@ pub const SQManage = struct {
         self.stagedCount += num;
     }
 
-    pub fn pushTail(self: *SQManage, entry: *const SQEntry) !void {
+    pub fn pushTail(self: *SQManage, entry: *const SQEntry, sync_doorbell: bool) !void {
         if (self.isFull()) {
             return error.QueueFull;
         }
@@ -133,15 +145,18 @@ pub const SQManage = struct {
         tail_ptr.* = entry.*;
         // Arrange the tail pointer
         try self.advanceTail(1);
+        if (sync_doorbell) {
+            _ = try self.syncSQDoorbell();
+        }
     }
 
-    pub fn syncSQDoorbell(self: *SQManage, sq_doorbell: *u64) !usize {
+    pub fn syncSQDoorbell(self: *SQManage) !usize {
         // Ensure the queue is not empty before updating the doorbell
         if (self.isEmpty()) {
             return error.QueueEmpty;
         }
         // Update the tail pointer in the doorbell
-        @atomicStore(u32, &sq_doorbell, @intCast(self.tail), std.builtin.AtomicOrder.release);
+        @atomicStore(u32, self.doorbell, @intCast(self.tail), std.builtin.AtomicOrder.release);
         // clear the staged count
         const stagedCount = self.stagedCount;
         self.pushedCount += stagedCount;
@@ -206,19 +221,19 @@ pub const CQManage = struct {
     /// Check phase tag validity
     pub fn isActiveEntry(self: *const CQManage, offset: usize) bool {
         const entry_ptr = self.headPtr(offset);
-        const current_phase = entry_ptr.p;
-        const prev_phase = self.phasetags.get(offset) orelse false;
+        const current_phase = entry_ptr.p != 0;
+        const prev_phase = self.phasetags.isSet(offset);
         return current_phase != prev_phase;
     }
 
     /// Wait for the completion queue to have at least one entry
-    pub fn waitComplete(self: *CQManage, timeout: std.time.Duration) !*const CQEntry {
+    pub fn waitComplete(self: *CQManage, timeout_ms: u32) !*const CQEntry {
         const start_time = std.time.milliTimestamp();
         while (!self.isActiveEntry(0)) {
-            if (std.time.milliTimestamp() - start_time >= timeout) {
+            if (std.time.milliTimestamp() - start_time >= timeout_ms) {
                 return error.Timeout; // Timeout waiting for completion
             }
-            std.time.sleep(1 * std.time.millisecond); // Sleep for a short duration
+            std.time.sleep(1);
         }
         // Return the head pointer of the completion queue
         const entry_ptr = self.headPtr(0);
@@ -237,7 +252,7 @@ pub const CQManage = struct {
     }
 
     /// Advance the head pointer and update phase tags
-    pub fn advanceHead(self: *CQManage, num: usize) !void {
+    pub fn advanceHead(self: *CQManage, num: usize, sync_doorbell: bool) !void {
         // Ensure the head pointer does not exceed the depth
         if (num > self.depth) {
             return error.QueueFull;
@@ -247,10 +262,22 @@ pub const CQManage = struct {
             const index = (self.head + i) % self.depth;
             const entry_ptr = self.headPtr(i);
             // Update the phase tag for the entry
-            self.phasetags.setValue(index, entry_ptr.p);
+            self.phasetags.setValue(index, entry_ptr.p != 0);
         }
         // Update the head pointer
         self.head = (self.head + num) % self.depth;
+        if (sync_doorbell) {
+            try self.syncCQDoorbell();
+        }
+    }
+
+    pub fn syncCQDoorbell(self: *CQManage) !void {
+        // Ensure the queue is not empty before updating the doorbell
+        if (self.remainCount() == 0) {
+            return error.QueueEmpty;
+        }
+        // Update the head pointer in the doorbell
+        @atomicStore(u32, self.doorbell, @intCast(self.head), std.builtin.AtomicOrder.release);
     }
 };
 

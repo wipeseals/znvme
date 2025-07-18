@@ -47,7 +47,6 @@ const DeviceStatus = enum {
 };
 /// Configuration for the NVM device
 const NvmDeviceConfig = struct {
-    sleep_ns: u64,
     timeout_sec: u32,
     prefer_cap_to: bool,
     admin_queue_depth: u12,
@@ -61,7 +60,6 @@ const NvmDeviceConfig = struct {
 
     pub fn default() NvmDeviceConfig {
         return NvmDeviceConfig{
-            .sleep_ns = 10,
             .timeout_sec = 30,
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
@@ -222,7 +220,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
-            std.time.sleep(self.config.sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -265,7 +263,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_enable)) {
                 return error.Timeout;
             }
-            std.time.sleep(self.config.sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -286,7 +284,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
-            std.time.sleep(self.config.sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -309,7 +307,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_shutdown)) {
                 return error.Timeout;
             }
-            std.time.sleep(self.config.sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -572,6 +570,7 @@ pub fn main() !void {
     // TEST: Create Identify Command
     const identify_size = 4 * 1024; // 4 KiB for Identify Command
     const identify_buf = try device.buf_pool_data.alloc(identify_size);
+    defer device.buf_pool_data.free(&identify_buf) catch {};
     const data_ptr, _ = try queue.SQDataPointer.init(identify_buf.iova, identify_size, null);
     const identify = queue.SQEntry{
         .cdw0 = queue.SQDword0{
@@ -594,5 +593,8 @@ pub fn main() !void {
     var aq = device.admin_queue orelse {
         return error.AdminQueueNotInitialized;
     };
-    try aq.push(&identify);
+    try aq.pushToSq(&identify, true);
+    const cq_entry = try aq.pullFromCq(config.timeout_sec);
+    try stdout.print("CQ Entry: {any}\n", .{cq_entry});
+    try util.printHexdump(stdout, identify_buf.buf, identify_buf.buf.len);
 }
