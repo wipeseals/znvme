@@ -51,6 +51,7 @@ const NvmDeviceConfig = struct {
     timeout_sec: u32,
     prefer_cap_to: bool,
     admin_queue_depth: u12,
+    force: bool,
     // VFIO Buffer Pool for Queues
     buf_pool_queue_iova: u64,
     buf_pool_queue_size: usize,
@@ -64,6 +65,7 @@ const NvmDeviceConfig = struct {
             .timeout_sec = 30,
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
+            .force = false,
             .buf_pool_queue_iova = 0x10000000,
             .buf_pool_queue_size = 256 * (@sizeOf(queue.SQEntry) + @sizeOf(queue.CQEntry)),
             .iova_data_base = 0x20000000,
@@ -114,7 +116,13 @@ const NvmDevice = struct {
             stderr.print("Controller Register is not valid.\n", .{}) catch {};
             util.printHexdump(stderr, vfio_container.bar0_map, @sizeOf(ControllerRegister)) catch {};
             stderr.print("Controller Register {}\n", .{ctrl_reg.*}) catch {};
-            return error.InvalidControllerRegister;
+
+            // If the force option is enabled, we proceed anyway
+            if (config.force) {
+                stderr.print("Force option is enabled, proceeding anyway.\n", .{}) catch {};
+            } else {
+                return error.InvalidControllerRegister;
+            }
         }
         // Allocate DMA buffer pools for queues and data
         var buf_pool_queues = try vfio.DmaBufPool.init(
@@ -307,9 +315,6 @@ const NvmDevice = struct {
 
     /// Get the doorbell address
     fn doorbellPtr(self: *const NvmDevice, queue_id: u32) !queue.Doorbell {
-        if (!self.ctrl_reg.isValid()) {
-            return error.InvalidControllerRegister;
-        }
         const base = 0x1000;
         const dstrd = self.ctrl_reg.cap.dstrd;
 
@@ -520,6 +525,7 @@ pub fn main() !void {
         \\-h, --help             Display this help and exit.
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
+        \\-f, --force            Force operation, skip controller register validation.
         \\<str>                  PCI address BDF (e.g., 0000:00:1f.2) of the NVMe controller.
     );
     var diag = clap.Diagnostic{};
@@ -547,6 +553,9 @@ pub fn main() !void {
         }
         config.timeout_sec = timeout;
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
+    }
+    if (res.args.force != 0) {
+        config.force = true;
     }
     var device = try NvmDevice.open(pci_addr, &config);
     defer device.close() catch {};
