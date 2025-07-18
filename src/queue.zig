@@ -58,11 +58,11 @@ pub const QPair = struct {
 
 pub const Doorbell = struct {
     /// Submission Queue Doorbell Pointer
-    sq: *u32,
+    sq: *volatile u32,
     /// Completion Queue Doorbell Pointer
-    cq: *u32,
+    cq: *volatile u32,
 
-    pub fn init(sq: *u32, cq: *u32) Doorbell {
+    pub fn init(sq: *volatile u32, cq: *volatile u32) Doorbell {
         return Doorbell{
             .sq = sq,
             .cq = cq,
@@ -83,14 +83,14 @@ pub const SQManage = struct {
     /// body of the queue
     entries: []SQEntry = undefined,
     /// Doorbell pointer
-    doorbell: *u32 = undefined,
+    doorbell: *volatile u32 = undefined,
     /// head pointer (sync CQ.SQHD)
     head_synced: usize = 0,
 
     pub fn create(
         d: usize,
         buf: []align(page_size_min) u8,
-        doorbell: *u32,
+        doorbell: *volatile u32,
     ) !SQManage {
         // check if the buffer size is sufficient
         if (buf.len < @sizeOf(SQEntry) * d) {

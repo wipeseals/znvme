@@ -9,6 +9,7 @@
       "args": [
         "--",
         "-v",
+        "--timeout", "5",
         "${input:pciAddress}",
       ],
       "preLaunchTask": "zig build",
