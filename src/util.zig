@@ -1,3 +1,5 @@
+const std = @import("std");
+
 /// Prints a hexdump of the given data to the specified writer.
 pub fn printHexdump(writer: anytype, data: []const u8, len: usize) !void {
     for (0..len) |i| {
@@ -21,8 +23,35 @@ pub fn alignDown(value: usize, alignment: usize) usize {
     return value / alignment * alignment;
 }
 
+pub fn findNConsecutiveOnes(
+    bitset: std.DynamicBitSet,
+    n: usize, // 探したい連続ビット数
+) ?u32 {
+    var cons_free: u32 = 0;
+    var cons_start: u32 = undefined;
+    var bit_idx: u32 = 0;
+    // search for n consecutive free(1) in the bitset
+    while (bit_idx < bitset.capacity()) : (bit_idx += 1) {
+        if (bitset.isSet(bit_idx)) {
+            if (cons_free == 0) {
+                // 連続が始まった位置を記録
+                cons_start = bit_idx;
+            }
+            cons_free += 1;
+        } else {
+            cons_free = 0;
+        }
+
+        // カウンターがnに達したかチェック
+        if (cons_free >= n) {
+            // 連続がnに達したので開始位置を返す
+            return cons_start;
+        }
+    }
+    return null;
+}
+
 test "alignUp and alignDown" {
-    const std = @import("std");
     const expect = std.testing.expect;
 
     // alignUp tests
@@ -42,4 +71,35 @@ test "alignUp and alignDown" {
     // alignment == 0
     try expect(alignUp(1234, 0) == 1234);
     try expect(alignDown(1234, 0) == 1234);
+}
+
+test "findNConsecutiveOnes" {
+    const allocator = std.testing.allocator;
+    const expect = std.testing.expect;
+
+    var bitset = try std.DynamicBitSet.initFull(allocator, 32);
+    defer bitset.deinit();
+    try expect(findNConsecutiveOnes(bitset, 1) == 0);
+    try expect(findNConsecutiveOnes(bitset, 2) == 0);
+    try expect(findNConsecutiveOnes(bitset, 3) == 0);
+    try expect(findNConsecutiveOnes(bitset, 31) == 0);
+    try expect(findNConsecutiveOnes(bitset, 32) == 0);
+
+    // Clear some bits
+    bitset.setValue(0, false);
+    bitset.setValue(1, false);
+    try expect(findNConsecutiveOnes(bitset, 1) == 2);
+    try expect(findNConsecutiveOnes(bitset, 2) == 2);
+    try expect(findNConsecutiveOnes(bitset, 29) == 2);
+    try expect(findNConsecutiveOnes(bitset, 30) == 2);
+    try expect(findNConsecutiveOnes(bitset, 31) == null);
+    try expect(findNConsecutiveOnes(bitset, 32) == null);
+
+    // Set some bits in the middle
+    bitset.setValue(19, false);
+    bitset.setValue(20, false);
+    bitset.setValue(21, false);
+    try expect(findNConsecutiveOnes(bitset, 1) == 2);
+    try expect(findNConsecutiveOnes(bitset, 17) == 2);
+    try expect(findNConsecutiveOnes(bitset, 18) == null);
 }

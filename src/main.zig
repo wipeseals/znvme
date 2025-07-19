@@ -5,6 +5,7 @@ const expect = std.testing.expect;
 const clap = @import("clap");
 
 const vfio = @import("vfio.zig");
+const queue = @import("queue.zig");
 const util = @import("util.zig");
 
 // VFIO用Cヘッダのインクルード
@@ -14,60 +15,9 @@ const c = @cImport({
 });
 
 const page_size_min = std.heap.page_size_min;
-const sleep_ns = 10; // 10ns
 
-/// NVMe Submission Queue Entry structure
-/// TODO: union support for Vendor Specific, ...
-const SubmissionQueueEntry = packed struct {
-    cdw0: SQDword0, // Submission Queue Dword 0
-    nsid: u32, // Namespace Identifier
-    cdw2: u32, // Command Dword 2
-    cdw3: u32, // Command Dword 3
-    mptr: u32, // Metadata Pointer
-    dptr: SQDataPointer, // Data Pointer
-    cdw10: u32, // Command Dword 10
-    cdw11: u32, // Command Dword 11
-    cdw12: u32, // Command Dword 12
-    cdw13: u32, // Command Dword 13
-    cdw14: u32, // Command Dword 14
-    cdw15: u32, // Command Dword 15
-};
-test "Submission Queue Size" {
-    const size = @sizeOf(SubmissionQueueEntry);
-    try expect(size == 64); // 16 * u32 = 64 bytes
-}
-/// Submission Queue Dword 0 structure
-const SQDword0 = packed struct {
-    opc: u8, // [7:0]  Opcode
-    fuse: u2, // [9:8]  Fused Operation
-    _rsvd0: u4, // [13:10] Reserved
-    psdt: u2, // [15:14] PRP or SGL Data Transfer
-    cid: u16, // [31:16] Command Identifier
-};
-/// Completion Queue structure
-/// TODO: SGL support
-const SQDataPointer = packed struct {
-    prp1: u32, // [31:0] PRP Entry 1
-    prp2: u32, // [63:32] PRP Entry 2
-};
-
-const CompletionQueueEntry = packed struct {
-    dw0: u32, // Command Specific Dword 0
-    dw1: u32, // Command Specific Dword 1
-    sqhd: u16, // Submission Queue Head Pointer
-    sqid: u16, // Submission Queue Identifier
-    cid: u16, // Command Identifier
-    p: u1, // Phase Tag
-    sc: u8, // Status Code
-    sct: u3, // Status Code Type
-    crd: u2, // Command Retry Delay
-    more: u1, // More
-    dnr: u1, // Do Not Retry
-};
-test "Completion Queue Size" {
-    const size = @sizeOf(CompletionQueueEntry);
-    try expect(size == 16);
-}
+const stdout = std.io.getStdOut().writer();
+const stderr = std.io.getStdErr().writer();
 
 /// Device status enumeration
 const DeviceStatus = enum {
@@ -97,36 +47,31 @@ const DeviceStatus = enum {
 };
 /// Configuration for the NVM device
 const NvmDeviceConfig = struct {
-    /// Timeout for controller reset in seconds
-    timeout_sec: u32 = 10,
-    /// Prefer the CAP.TO setting
-    prefer_cap_to: bool = true,
-    /// Admin queue depth, minimum is 1 (規格上+1が必要だが、0'base registerなのでそのままセット)
-    admin_queue_depth: u12 = 1,
-    /// Base address for I/O Virtual Address (IOVA) for admin submission queue
-    iova_asq_base: u64 = 0x10000000,
-    /// Base address for I/O Virtual Address (IOVA) for admin completion queue
-    iova_acq_base: u64 = 0x20000000,
-    /// Base address for I/O Virtual Address (IOVA) for I/O queues
-    iova_sq_base: u64 = 0x30000000,
-    /// Base address for I/O Virtual Address (IOVA) for I/O submission queue
-    iova_cq_base: u64 = 0x40000000,
-    /// Base address for I/O Virtual Address (IOVA) for data
-    iova_data_base: u64 = 0xa0000000,
+    timeout_sec: u32,
+    prefer_cap_to: bool,
+    admin_queue_depth: u12,
+    force: bool,
+    // VFIO Buffer Pool for Queues
+    buf_pool_queue_iova: u64,
+    buf_pool_queue_size: usize,
+    // VFIO Buffer Pool for Data (Large Data Transfers)
+    iova_data_base: u64,
+    iova_data_size: usize,
 
     pub fn default() NvmDeviceConfig {
         return NvmDeviceConfig{
-            .timeout_sec = 10,
+            .timeout_sec = 30,
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
-            .iova_asq_base = 0x10000000,
-            .iova_acq_base = 0x20000000,
-            .iova_sq_base = 0x30000000,
-            .iova_cq_base = 0x40000000,
-            .iova_data_base = 0xa0000000,
+            .force = false,
+            .buf_pool_queue_iova = 0x10000000,
+            .buf_pool_queue_size = 256 * (@sizeOf(queue.SQEntry) + @sizeOf(queue.CQEntry)),
+            .iova_data_base = 0x20000000,
+            .iova_data_size = 512 * 1024 * 1024,
         };
     }
 };
+// TODO: IOVA Allocation Logic for Queue/Datas
 
 /// NVMe device structure
 const NvmDevice = struct {
@@ -138,10 +83,12 @@ const NvmDevice = struct {
     ctrl_reg: *volatile ControllerRegister,
     /// VFIO Container
     vfio_container: vfio.Container,
-    /// Admin Submission Queueの本体
-    asq_body: ?vfio.MappedBuf = null,
-    /// Admin Completion Queueの本体
-    acq_body: ?vfio.MappedBuf = null,
+    /// DMA Buffer Pool for Queues
+    buf_pool_queues: vfio.DmaBufPool,
+    /// DMA Buffer Pool for Data
+    buf_pool_data: vfio.DmaBufPool,
+    /// Admin Queue
+    admin_queue: ?queue.QPair,
 
     fn timeoutSec(self: *const NvmDevice) u32 {
         if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
@@ -155,30 +102,49 @@ const NvmDevice = struct {
         return (std.time.milliTimestamp() - start) > timeout_ms;
     }
 
-    fn freeAdminQueues(self: *NvmDevice) !void {
-        if (self.asq_body) |_| {
-            try self.asq_body.?.free(&self.vfio_container);
-        }
-        if (self.acq_body) |_| {
-            try self.acq_body.?.free(&self.vfio_container);
-        }
-        self.asq_body = null;
-        self.acq_body = null;
-    }
-
     /// Initialize the NVM device by mapping the controller registers from BAR0.
     pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
-        const vfio_container = try vfio.Container.create(pci_addr);
+        // Create a VFIO container for the specified PCI address
+        var vfio_container = try vfio.Container.create(pci_addr);
+        errdefer vfio_container.remove();
+
+        // Map the controller registers from BAR0
         const ctrl_reg: *volatile ControllerRegister = @ptrCast(vfio_container.bar0_map);
         if (!ctrl_reg.isValid()) {
-            return error.InvalidControllerRegister;
+            stderr.print("Controller Register is not valid.\n", .{}) catch {};
+            util.printHexdump(stderr, vfio_container.bar0_map, @sizeOf(ControllerRegister)) catch {};
+            stderr.print("Controller Register {}\n", .{ctrl_reg.*}) catch {};
+
+            // If the force option is enabled, we proceed anyway
+            if (config.force) {
+                stderr.print("Force option is enabled, proceeding anyway.\n", .{}) catch {};
+            } else {
+                return error.InvalidControllerRegister;
+            }
         }
+        // Allocate DMA buffer pools for queues and data
+        var buf_pool_queues = try vfio.DmaBufPool.init(
+            config.buf_pool_queue_iova,
+            config.buf_pool_queue_size,
+            c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
+            &vfio_container,
+        );
+        errdefer buf_pool_queues.deinit(&vfio_container) catch {};
+        const buf_pool_data = try vfio.DmaBufPool.init(
+            config.iova_data_base,
+            config.iova_data_size,
+            c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE,
+            &vfio_container,
+        );
         // 成功したのでリソースの所有権をムーブ
         const dev = NvmDevice{
             .pci_addr = pci_addr,
             .config = config.*,
             .vfio_container = vfio_container,
             .ctrl_reg = ctrl_reg,
+            .buf_pool_queues = buf_pool_queues,
+            .buf_pool_data = buf_pool_data,
+            .admin_queue = null, // Initially no admin queue
         };
         return dev;
     }
@@ -200,14 +166,36 @@ const NvmDevice = struct {
             };
         }
         // Release the ASQ/ACQ buffers if they were allocated
-        try self.freeAdminQueues();
+        if (self.admin_queue) |_| {
+            try self.admin_queue.?.delete(&self.buf_pool_queues);
+            self.admin_queue = null;
+        }
         // Unmap the controller registers
         self.vfio_container.remove();
     }
 
     /// print hexdump of the controller registers.
-    pub fn printRaw(self: *const NvmDevice, writer: anytype) !void {
+    pub fn printCtrlRegs(self: *const NvmDevice, writer: anytype) !void {
         try util.printHexdump(writer, self.vfio_container.bar0_map, @sizeOf(ControllerRegister));
+    }
+
+    pub fn printAdminQueue(self: *const NvmDevice, writer: anytype) !void {
+        if (self.admin_queue) |q| {
+            try writer.print("Admin Submission Queue", .{});
+            try util.printHexdump(writer, q.sq_body.buf, q.sq_body.buf.len);
+            try writer.print("Admin Completion Queue", .{});
+            try util.printHexdump(writer, q.cq_body.buf, q.cq_body.buf.len);
+            try self.printDoorbell(writer, 0);
+        } else {
+            try writer.print("Admin Queue is not initialized.\n", .{});
+        }
+    }
+
+    pub fn printDoorbell(self: *const NvmDevice, writer: anytype, queue_id: u32) !void {
+        const doorbell = try self.doorbellPtr(queue_id);
+        try writer.print("Doorbell for Queue {d}:\n", .{queue_id});
+        try writer.print("  SQ: {}(@0x{x})\n", .{ doorbell.sq.*, @intFromPtr(doorbell.sq) });
+        try writer.print("  CQ: {}(@0x{x})\n", .{ doorbell.cq.*, @intFromPtr(doorbell.cq) });
     }
 
     /// Get the status of the NVM device based on the controller registers.
@@ -251,36 +239,39 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
-            std.time.sleep(sleep_ns);
+            std.time.sleep(1);
         }
     }
 
     pub fn enable(self: *NvmDevice) !void {
         // Check if the Admin Queue already exists
-        try self.freeAdminQueues();
+        if (self.admin_queue) |_| {
+            try self.admin_queue.?.delete(&self.buf_pool_queues);
+            self.admin_queue = null; // Clear the existing queue
+        }
 
         // allocate ASQ and ACQ
-        const admin_queue_depth = self.config.admin_queue_depth;
-        const asq_size = util.alignUp(admin_queue_depth * @sizeOf(SubmissionQueueEntry), page_size_min);
-        const acq_size = util.alignUp(admin_queue_depth * @sizeOf(CompletionQueueEntry), page_size_min);
-        const flags = c.VFIO_DMA_MAP_FLAG_READ | c.VFIO_DMA_MAP_FLAG_WRITE;
-        self.asq_body = try vfio.MappedBuf.alloc(self.config.iova_asq_base, asq_size, flags, &self.vfio_container);
-        self.acq_body = try vfio.MappedBuf.alloc(self.config.iova_acq_base, acq_size, flags, &self.vfio_container);
+        const doorbell = try self.doorbellPtr(0);
+        self.admin_queue = try queue.QPair.create(
+            self.config.admin_queue_depth,
+            self.config.admin_queue_depth,
+            &doorbell,
+            &self.buf_pool_queues,
+        );
         errdefer {
-            self.asq_body.?.free(&self.vfio_container) catch {};
-            self.acq_body.?.free(&self.vfio_container) catch {};
-            self.asq_body = null;
-            self.acq_body = null;
+            self.admin_queue.?.delete(&self.buf_pool_queues) catch {};
+            self.admin_queue = null;
         }
+
         // set ASQ, ACQ, AQA
         self.ctrl_reg.aqa = AdminQueueAttributes{
-            .asqs = admin_queue_depth,
+            .asqs = self.config.admin_queue_depth,
             ._rsvd0 = 0,
-            .acqs = admin_queue_depth,
+            .acqs = self.config.admin_queue_depth,
             ._rsvd1 = 0,
         };
-        self.ctrl_reg.asq = @intCast(self.config.iova_asq_base);
-        self.ctrl_reg.acq = @intCast(self.config.iova_acq_base);
+        self.ctrl_reg.asq = @intCast(self.admin_queue.?.sq_body.iova);
+        self.ctrl_reg.acq = @intCast(self.admin_queue.?.cq_body.iova);
 
         // set en = 1 to enable the controller
         var cc_enable = self.ctrl_reg.cc;
@@ -291,7 +282,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_enable)) {
                 return error.Timeout;
             }
-            std.time.sleep(sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -312,7 +303,7 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_reset)) {
                 return error.Timeout;
             }
-            std.time.sleep(sleep_ns);
+            std.time.sleep(1);
         }
     }
 
@@ -335,8 +326,28 @@ const NvmDevice = struct {
             if (self.isTimeoutExceeded(start_shutdown)) {
                 return error.Timeout;
             }
-            std.time.sleep(sleep_ns);
+            std.time.sleep(1);
         }
+    }
+
+    /// Get the doorbell address
+    fn doorbellPtr(self: *const NvmDevice, queue_id: u32) !queue.Doorbell {
+        const base = 0x1000;
+        const dstrd = self.ctrl_reg.cap.dstrd;
+
+        // Start: 0x00 + (idx * (4 << dstrd))
+        //   id: sq0, cq0, iosq1, iocq1, ...
+        const sq_idx = queue_id * 2;
+        const cq_idx = sq_idx + 1;
+        const sq_doorbell_offset = base + (sq_idx * (@as(usize, 4) << dstrd));
+        const cq_doorbell_offset = base + (cq_idx * (@as(usize, 4) << dstrd));
+        // Ensure the offsets are within the bounds of BAR0
+        const sq_doorbell_ptr: []align(4) u8 = @alignCast(self.vfio_container.bar0_map[sq_doorbell_offset..][0..4]);
+        const cq_doorbell_ptr: []align(4) u8 = @alignCast(self.vfio_container.bar0_map[cq_doorbell_offset..][0..4]);
+        return queue.Doorbell{
+            .sq = @ptrCast(sq_doorbell_ptr),
+            .cq = @ptrCast(cq_doorbell_ptr),
+        };
     }
 };
 
@@ -508,14 +519,12 @@ pub fn main() !void {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const stdout = std.io.getStdOut().writer();
-    const stderr = std.io.getStdErr().writer();
-
     // コマンドライン引数を取得
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
+        \\-f, --force            Force operation, skip controller register validation.
         \\<str>                  PCI address BDF (e.g., 0000:00:1f.2) of the NVMe controller.
     );
     var diag = clap.Diagnostic{};
@@ -544,6 +553,9 @@ pub fn main() !void {
         config.timeout_sec = timeout;
         config.prefer_cap_to = false; // Use the provided timeout instead of CAP.TO
     }
+    if (res.args.force != 0) {
+        config.force = true;
+    }
     var device = try NvmDevice.open(pci_addr, &config);
     defer device.close() catch {};
     if (verbose) {
@@ -555,11 +567,6 @@ pub fn main() !void {
         try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
     }
 
-    try device.shutdown(ShutdownNotification.normal);
-    if (verbose) {
-        try stdout.print("[Post-Shutdown] Current status: {}\n", .{device.status()});
-    }
-
     if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
@@ -569,8 +576,42 @@ pub fn main() !void {
             device.status(),
         });
         try stdout.print("Controller Register Raw:", .{});
-        try device.printRaw(stdout);
+        try device.printCtrlRegs(stdout);
 
         try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
     }
+
+    // TEST: Create Identify Command
+    const identify_size = 4 * 1024; // 4 KiB for Identify Command
+    const identify_buf = try device.buf_pool_data.alloc(identify_size);
+    defer device.buf_pool_data.free(&identify_buf) catch {};
+    const data_ptr, _ = try queue.SQDataPointer.init(identify_buf.iova, identify_size, null);
+    const identify = queue.SQEntry{
+        .cdw0 = queue.SQDword0{
+            .opc = queue.AdminOpcode.identify,
+            .fuse = queue.FusedOperation.none,
+            .psdt = queue.SQDataPointerType.prp,
+            .cid = 12345, // Command Identifier
+        },
+        .nsid = 0x0,
+        .cdw2 = 0, // Command Dword 2
+        .cdw3 = 0, // Command Dword 3
+        .mptr = 0, // Metadata Pointer (not used for Identify Command)
+        .dptr = data_ptr, // Data Pointer
+        .cdw10 = queue.Cdw10Identify{
+            .cns = queue.ControllerNamespace.controller,
+            ._rsvd = 0,
+            .cntid = 0x0,
+        },
+    };
+    var aq = device.admin_queue orelse {
+        return error.AdminQueueNotInitialized;
+    };
+    try aq.pushToSq(&identify, true);
+    const cq_entry = aq.pullFromCq(config.timeout_sec * 1000) catch |err| {
+        device.printAdminQueue(stderr) catch {};
+        return err;
+    };
+    try stdout.print("CQ Entry: {any}\n", .{cq_entry});
+    try util.printHexdump(stdout, identify_buf.buf, identify_buf.buf.len);
 }

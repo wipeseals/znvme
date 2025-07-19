@@ -20,4 +20,4 @@ jobs:
         with:
           version: ${{ steps.zig-version.outputs.version }}
       - name: Run zig build test
-        run: zig build test
+        run: zig build test --summary all
