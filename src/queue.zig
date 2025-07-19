@@ -168,11 +168,11 @@ pub const SQManage = struct {
         // CQHDBL is the head pointer of the completion queue
         const resp_count = (cq_head - self.head_synced) % self.depth;
         self.head_synced = cq_head;
-        if (resp_count > self.stagedCount) {
+        if (resp_count > self.pushedCount) {
             return error.TooManyResponses;
         } else {
             // Adjust staged count based on the response count
-            self.stagedCount -= resp_count;
+            self.pushedCount -= resp_count;
         }
     }
 };
@@ -206,7 +206,7 @@ pub const CQManage = struct {
         // create the queue structure
         return CQManage{
             .head = 0,
-            .depth = d,
+            .depth = d + 1, // +1 for head/tail wrap-around
             .entries = entries,
             .doorbell = doorbell,
             .phasetags = std.StaticBitSet(MAX_QUEUE_DEPTH).initEmpty(),
