@@ -213,20 +213,20 @@ pub const Container = struct {
             std.debug.print("  - NOTE: This region supports mmap.\n", .{});
         }
 
-        const config_space_map = try std.posix.mmap(
-            null,
-            config_region_info.size,
-            std.posix.PROT.READ | std.posix.PROT.WRITE,
-            .{ .TYPE = .SHARED },
-            device_fd,
-            config_region_info.offset,
-        );
-        defer std.posix.munmap(config_space_map);
+        const command_reg_offset = config_region_info.offset + 4; // コマンドレジスタのオフセット
 
-        const command_reg_ptr: *volatile u16 = (@ptrCast(config_space_map.ptr + 4));
-        var command_val = @atomicLoad(u16, command_reg_ptr, std.builtin.AtomicOrder.acquire);
-        command_val |= 0x04; // Bus Masterビットを立てる
-        @atomicStore(u16, command_reg_ptr, command_val, std.builtin.AtomicOrder.release);
+        // read the current value of the command register
+        var command_val_buf: [2]u8 = undefined;
+        const bytes_read = try std.posix.pread(device_fd, &command_val_buf, command_reg_offset);
+        if (bytes_read != 2) return error.VfioPreadFailed;
+        var command_val = std.mem.readInt(u16, &command_val_buf, .little);
+        // Bus Master Enableビットを立てる
+        command_val |= 0x02; // VFIO_PCI_COMMAND_MASTER bit
+        command_val |= 0x04; // VFIO_PCI_COMMAND_INTX bit
+        // write the modified value back to the command register
+        std.mem.writeInt(u16, &command_val_buf, command_val, .little);
+        const bytes_written = try std.posix.pwrite(device_fd, &command_val_buf, command_reg_offset);
+        if (bytes_written != 2) return error.VfioPwriteFailed;
 
         // VFIO_PCI_BAR0_REGION_INDEX でBAR0空間の情報を取得
         var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };

@@ -567,11 +567,6 @@ pub fn main() !void {
         try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
     }
 
-    // try device.shutdown(ShutdownNotification.normal);
-    // if (verbose) {
-    //     try stdout.print("[Post-Shutdown] Current status: {}\n", .{device.status()});
-    // }
-
     if (verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
@@ -596,9 +591,9 @@ pub fn main() !void {
             .opc = queue.AdminOpcode.identify,
             .fuse = queue.FusedOperation.none,
             .psdt = queue.SQDataPointerType.prp,
-            .cid = 0xabcd, // Command Identifier
+            .cid = 12345, // Command Identifier
         },
-        .nsid = 0x1,
+        .nsid = 0x0,
         .cdw2 = 0, // Command Dword 2
         .cdw3 = 0, // Command Dword 3
         .mptr = 0, // Metadata Pointer (not used for Identify Command)
