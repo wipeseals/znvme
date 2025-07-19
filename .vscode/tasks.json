@@ -24,7 +24,7 @@
 		{
 			"type": "shell",
 			"label": "zig build test",
-			"command": "zig build test",
+			"command": "zig build test --summary all",
 			"group": "test",
 			"isBackground": false,
 			"problemMatcher": [
