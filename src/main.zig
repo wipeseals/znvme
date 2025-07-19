@@ -185,7 +185,7 @@ const NvmDevice = struct {
             try util.printHexdump(writer, q.sq_body.buf, q.sq_body.buf.len);
             try writer.print("Admin Completion Queue", .{});
             try util.printHexdump(writer, q.cq_body.buf, q.cq_body.buf.len);
-            try self.printDoorbell(writer, 1);
+            try self.printDoorbell(writer, 0);
         } else {
             try writer.print("Admin Queue is not initialized.\n", .{});
         }
@@ -613,11 +613,6 @@ pub fn main() !void {
         return error.AdminQueueNotInitialized;
     };
     try aq.pushToSq(&identify, true);
-    // test write doorbell directly
-    const doorbell = try device.doorbellPtr(0);
-    try device.printDoorbell(stdout, 0);
-    @atomicStore(u32, doorbell.sq, 1, std.builtin.AtomicOrder.release);
-
     const cq_entry = aq.pullFromCq(config.timeout_sec * 1000) catch |err| {
         device.printAdminQueue(stderr) catch {};
         return err;

@@ -193,6 +193,41 @@ pub const Container = struct {
             return error.VfioGetDeviceFdFailed;
         }
         device_fd = @intCast(fd_result);
+
+        // PCI ConfigからBus Msater Enableビットを立てる
+        var config_region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
+        config_region_info.index = c.VFIO_PCI_CONFIG_REGION_INDEX;
+        if (c.ioctl(device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &config_region_info) != 0) {
+            return error.VfioGetRegionInfoFailed;
+        }
+
+        std.debug.print("PCI Config Space Info:\n", .{});
+        std.debug.print("  - size: {d}\n", .{config_region_info.size});
+        std.debug.print("  - offset: 0x{x}\n", .{config_region_info.offset});
+        std.debug.print("  - flags: 0x{x}\n", .{config_region_info.flags}); // ★ flags を表示
+
+        // mmap可能かどうかのチェック
+        if (config_region_info.flags & c.VFIO_REGION_INFO_FLAG_MMAP == 0) {
+            std.debug.print("  - NOTE: This region does NOT support mmap.\n", .{});
+        } else {
+            std.debug.print("  - NOTE: This region supports mmap.\n", .{});
+        }
+
+        const config_space_map = try std.posix.mmap(
+            null,
+            config_region_info.size,
+            std.posix.PROT.READ | std.posix.PROT.WRITE,
+            .{ .TYPE = .SHARED },
+            device_fd,
+            config_region_info.offset,
+        );
+        defer std.posix.munmap(config_space_map);
+
+        const command_reg_ptr: *volatile u16 = (@ptrCast(config_space_map.ptr + 4));
+        var command_val = @atomicLoad(u16, command_reg_ptr, std.builtin.AtomicOrder.acquire);
+        command_val |= 0x04; // Bus Masterビットを立てる
+        @atomicStore(u16, command_reg_ptr, command_val, std.builtin.AtomicOrder.release);
+
         // VFIO_PCI_BAR0_REGION_INDEX でBAR0空間の情報を取得
         var region_info: c.struct_vfio_region_info = .{ .argsz = @sizeOf(c.struct_vfio_region_info) };
         region_info.index = c.VFIO_PCI_BAR0_REGION_INDEX;
