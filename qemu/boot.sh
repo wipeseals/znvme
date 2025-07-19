@@ -36,10 +36,10 @@ $QEMU \
     -D boot.log \
     -drive file=$OS_IMG,if=none,id=os_drive \
     -device virtio-blk-pci,drive=os_drive \
-    # test nvme drive
+    # Test nvme drive
     -drive file=$TEST_NVME_IMG,if=none,id=nvme0 \
     -device nvme,drive=nvme0,serial=deadbeef \
-    # mount project root directory
+    # Mount project root directory
     -virtfs local,path="$ZNVME_ROOT",mount_tag=znvme_root,security_model=passthrough \
     -fsdev local,id=fsdev0,path="$ZNVME_ROOT" \
     $EXT_ARGS
