@@ -421,13 +421,13 @@ test "SQManage Creation and Push" {
     const allocator = std.heap.page_allocator;
     const depth = 16;
     const buf_size = @sizeOf(SQEntry) * depth;
-    const buf = try allocator.alloc(u8, buf_size);
+    const buf: []align(page_size_min) u8 = @alignCast(try allocator.alloc(u8, buf_size));
+    var doorbell: u32 = 0;
     defer allocator.free(buf);
 
-    const sq_manage = try SQManage.create(depth, buf[0..]);
-    defer sq_manage.deinit();
+    var sq_manage = try SQManage.create(depth, buf, &doorbell);
 
-    try expect(sq_manage.depth == depth);
+    try expect(sq_manage.depth == depth + 1);
     try expect(sq_manage.entries.len == depth);
     try expect(sq_manage.isEmpty());
     try expect(!sq_manage.isFull());
@@ -435,10 +435,10 @@ test "SQManage Creation and Push" {
     // push entry
     const entry = SQEntry{
         .cdw0 = SQDword0{
-            .opc = 0x01, // Example opcode
-            .fuse = 0,
+            .opc = AdminOpcode.identify,
+            .fuse = FusedOperation.none,
             ._rsvd0 = 0,
-            .psdt = 0,
+            .psdt = SQDataPointerType.prp,
             .cid = 1, // Example command ID
         },
         .nsid = 1, // Example Namespace ID
@@ -449,28 +449,55 @@ test "SQManage Creation and Push" {
             .prp1 = 0,
             .prp2 = 0,
         },
-        .cdw10 = 0,
+        .cdw10 = Cdw10Identify{
+            .cns = ControllerNamespace.controller,
+            ._rsvd = 0,
+            .cntid = 0, // Example Controller ID
+        },
         .cdw11 = 0,
         .cdw12 = 0,
         .cdw13 = 0,
         .cdw14 = 0,
         .cdw15 = 0,
     };
-    try sq_manage.pushTail(&entry);
+    try sq_manage.pushTail(&entry, false);
     try expect(!sq_manage.isEmpty());
     try expect(sq_manage.stagedCount == 1);
+    try expect(sq_manage.pushedCount == 0);
 
     // advance tail
     try sq_manage.advanceTail(3);
     try expect(sq_manage.tail == 4);
     try expect(sq_manage.stagedCount == 4);
+    try expect(sq_manage.pushedCount == 0);
+    try expect(doorbell == 0); // doorbell should not be updated yet
 
     // sync to doorbell
-    var sq_doorbell: u64 = 0;
-    const pushed_count = try sq_manage.syncSQDoorbell(&sq_doorbell);
+    const pushed_count = try sq_manage.syncSQDoorbell();
     try expect(pushed_count == 4);
     try expect(sq_manage.tail == 4);
     try expect(sq_manage.stagedCount == 0); // count should be reset after update
+    try expect(sq_manage.pushedCount == 4);
+    try expect(doorbell == 4); // doorbell should be updated to tail
+
+    // push w/ sync
+    try sq_manage.pushTail(&entry, true);
+    try expect(sq_manage.stagedCount == 0);
+    try expect(sq_manage.pushedCount == 5);
+    try expect(doorbell == 5); // doorbell should be updated to tail
+    try expect(sq_manage.tail == 5); // tail should be updated
+
+    // sync SQ Head
+    try sq_manage.syncCQHead(3);
+    try expect(sq_manage.pushedCount == 2); // 5 - 3
+    try expect(sq_manage.stagedCount == 0);
+    try expect(sq_manage.tail == 5); // tail should not change
+
+    // sync all entries
+    try sq_manage.syncCQHead(5);
+    try expect(sq_manage.pushedCount == 0); // all entries should be synced
+    try expect(sq_manage.stagedCount == 0);
+    try expect(sq_manage.tail == 5); // tail should not change
 }
 
 test "Submission Queue Size" {

@@ -74,18 +74,32 @@ test "alignUp and alignDown" {
 }
 
 test "findNConsecutiveOnes" {
+    const allocator = std.testing.allocator;
     const expect = std.testing.expect;
 
-    var bitset = std.StaticBitSet(32).initFull();
-    try expect(findNConsecutiveOnes(32, bitset, 1) == 0);
-    try expect(findNConsecutiveOnes(32, bitset, 2) == 0);
-    try expect(findNConsecutiveOnes(32, bitset, 3) == 0);
-    try expect(findNConsecutiveOnes(32, bitset, 4) == 0);
+    var bitset = try std.DynamicBitSet.initFull(allocator, 32);
+    defer bitset.deinit();
+    try expect(findNConsecutiveOnes(bitset, 1) == 0);
+    try expect(findNConsecutiveOnes(bitset, 2) == 0);
+    try expect(findNConsecutiveOnes(bitset, 3) == 0);
+    try expect(findNConsecutiveOnes(bitset, 31) == 0);
+    try expect(findNConsecutiveOnes(bitset, 32) == 0);
 
     // Clear some bits
     bitset.setValue(0, false);
     bitset.setValue(1, false);
-    try expect(findNConsecutiveOnes(32, bitset, 1) == 2);
-    try expect(findNConsecutiveOnes(32, bitset, 2) == 2);
-    try expect(findNConsecutiveOnes(32, bitset, 3) == null);
+    try expect(findNConsecutiveOnes(bitset, 1) == 2);
+    try expect(findNConsecutiveOnes(bitset, 2) == 2);
+    try expect(findNConsecutiveOnes(bitset, 29) == 2);
+    try expect(findNConsecutiveOnes(bitset, 30) == 2);
+    try expect(findNConsecutiveOnes(bitset, 31) == null);
+    try expect(findNConsecutiveOnes(bitset, 32) == null);
+
+    // Set some bits in the middle
+    bitset.setValue(19, false);
+    bitset.setValue(20, false);
+    bitset.setValue(21, false);
+    try expect(findNConsecutiveOnes(bitset, 1) == 2);
+    try expect(findNConsecutiveOnes(bitset, 17) == 2);
+    try expect(findNConsecutiveOnes(bitset, 18) == null);
 }
