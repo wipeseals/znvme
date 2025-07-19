@@ -310,18 +310,18 @@ pub const Cdw10Identify = packed struct {
 /// NVMe Submission Queue Entry structure
 /// TODO: union support for Vendor Specific, ...
 pub const SQEntry = packed struct {
-    cdw0: SQDword0, // Submission Queue Dword 0
-    nsid: u32 = 0xffffffff, // Namespace Identifier
-    cdw2: u32 = 0x0, // Command Dword 2
-    cdw3: u32 = 0x0, // Command Dword 3
-    mptr: u32 = 0x0, // Metadata Pointer
-    dptr: SQDataPointer, // Data Pointer
-    cdw10: Cdw10Identify, // Command Dword 10
-    cdw11: u32 = 0x0, // Command Dword 11
-    cdw12: u32 = 0x0, // Command Dword 12
-    cdw13: u32 = 0x0, // Command Dword 13
-    cdw14: u32 = 0x0, // Command Dword 14
-    cdw15: u32 = 0x0, // Command Dword 15
+    cdw0: SQDword0, // 03:00 bytes: Submission Queue Dword 0
+    nsid: u32 = 0xffffffff, // 07:04 bytes: Namespace Identifier
+    cdw2: u32 = 0x0, // 11:08 bytes: Command Dword 2
+    cdw3: u32 = 0x0, // 15:12 bytes: Command Dword 3
+    mptr: u64 = 0x0, // 23:16 bytes: Metadata Pointer
+    dptr: SQDataPointer, // 39:24 bytes: Data Pointer
+    cdw10: Cdw10Identify, // 43:40 bytes: Command Dword 10
+    cdw11: u32 = 0x0, // 47:44 bytes: Command Dword 11
+    cdw12: u32 = 0x0, // 51:48 bytes: Command Dword 12
+    cdw13: u32 = 0x0, // 55:52 bytes: Command Dword 13
+    cdw14: u32 = 0x0, // 59:56 bytes: Command Dword 14
+    cdw15: u32 = 0x0, // 63:60 bytes: Command Dword 15
 };
 
 pub const FusedOperation = enum(u2) {

@@ -613,6 +613,11 @@ pub fn main() !void {
         return error.AdminQueueNotInitialized;
     };
     try aq.pushToSq(&identify, true);
+    // test write doorbell directly
+    const doorbell = try device.doorbellPtr(0);
+    try device.printDoorbell(stdout, 0);
+    @atomicStore(u32, doorbell.sq, 1, std.builtin.AtomicOrder.release);
+
     const cq_entry = aq.pullFromCq(config.timeout_sec * 1000) catch |err| {
         device.printAdminQueue(stderr) catch {};
         return err;
