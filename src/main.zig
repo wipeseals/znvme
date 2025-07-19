@@ -457,6 +457,59 @@ test "NVMe Version String Format" {
     // Should format as MAJOR.MINOR.TERSE = 2.0.1
     try expect(std.mem.eql(u8, version_str2, "2.0.1"));
 }
+
+test "Controller Register isValid function" {
+    // Create a basic valid controller register
+    var ctrl_reg = ControllerRegister{
+        .cap = ControllerCapabilities{
+            .mqes = 1, // Non-zero
+            .cqr = 0,
+            .amsWrr = 0,
+            .amsVs = 0,
+            ._rsvd0 = 0,
+            .to = 0,
+            .dstrd = 0,
+            .nssrs = 0,
+            .cssNvm = 1, // Must be 1
+            ._rsvd1 = 0,
+            .bps = 0,
+            ._rsvd2 = 0,
+            .mpsMin = 0,
+            .mpsMax = 0,
+            ._rsvd3 = 0,
+        },
+        .vs = SpecificationVersion{
+            .ter = 0,
+            .min = 1, // Non-zero version
+            .maj = 1,
+        },
+        .intms = 0,
+        .intmc = 0,
+        .cc = undefined,
+        ._rsvd0 = 0,
+        .csts = undefined,
+        .nssr = 0,
+        .aqa = undefined,
+        .asq = 0,
+        .acq = 0,
+    };
+    
+    // Should be valid
+    try expect(ctrl_reg.isValid() == true);
+    
+    // Test invalid cases
+    ctrl_reg.cap.mqes = 0; // Invalid: must be non-zero
+    try expect(ctrl_reg.isValid() == false);
+    
+    ctrl_reg.cap.mqes = 1; // Fix it
+    ctrl_reg.cap.cssNvm = 0; // Invalid: must be 1
+    try expect(ctrl_reg.isValid() == false);
+    
+    ctrl_reg.cap.cssNvm = 1; // Fix it
+    ctrl_reg.vs.maj = 0;
+    ctrl_reg.vs.min = 0; // Invalid: version must be non-zero
+    try expect(ctrl_reg.isValid() == false);
+}
 const ControllerCapabilities = packed struct {
     mqes: u16, // [15:0]  Maximum Queues Supported
     cqr: u1, // [16]    Contiguous Queues Required
