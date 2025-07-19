@@ -17,4 +17,4 @@ jobs:
         with:
           version: 0.14.1
       - name: Run zig build test
-        run: zig build test
+        run: zig build test --summary all
