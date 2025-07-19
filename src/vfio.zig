@@ -200,23 +200,9 @@ pub const Container = struct {
         if (c.ioctl(device_fd, c.VFIO_DEVICE_GET_REGION_INFO, &config_region_info) != 0) {
             return error.VfioGetRegionInfoFailed;
         }
-
-        std.debug.print("PCI Config Space Info:\n", .{});
-        std.debug.print("  - size: {d}\n", .{config_region_info.size});
-        std.debug.print("  - offset: 0x{x}\n", .{config_region_info.offset});
-        std.debug.print("  - flags: 0x{x}\n", .{config_region_info.flags}); // ★ flags を表示
-
-        // mmap可能かどうかのチェック
-        if (config_region_info.flags & c.VFIO_REGION_INFO_FLAG_MMAP == 0) {
-            std.debug.print("  - NOTE: This region does NOT support mmap.\n", .{});
-        } else {
-            std.debug.print("  - NOTE: This region supports mmap.\n", .{});
-        }
-
-        const command_reg_offset = config_region_info.offset + 4; // コマンドレジスタのオフセット
-
         // read the current value of the command register
         var command_val_buf: [2]u8 = undefined;
+        const command_reg_offset = config_region_info.offset + 4;
         const bytes_read = try std.posix.pread(device_fd, &command_val_buf, command_reg_offset);
         if (bytes_read != 2) return error.VfioPreadFailed;
         var command_val = std.mem.readInt(u16, &command_val_buf, .little);
