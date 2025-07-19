@@ -43,3 +43,21 @@ test "alignUp and alignDown" {
     try expect(alignUp(1234, 0) == 1234);
     try expect(alignDown(1234, 0) == 1234);
 }
+
+test "alignUp edge cases" {
+    const std = @import("std");
+    const expect = std.testing.expect;
+
+    // Test with different alignment values
+    try expect(alignUp(15, 8) == 16);
+    try expect(alignUp(16, 8) == 16);
+    try expect(alignUp(17, 8) == 24);
+    
+    // Test with alignment of 1 (should return same value)
+    try expect(alignUp(42, 1) == 42);
+    try expect(alignDown(42, 1) == 42);
+    
+    // Test with larger values
+    try expect(alignUp(1000000, 512) == 1000448); // 1000000 + 448
+    try expect(alignDown(1000000, 512) == 999936); // 1953 * 512
+}

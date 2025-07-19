@@ -44,12 +44,20 @@ const SQDword0 = packed struct {
     psdt: u2, // [15:14] PRP or SGL Data Transfer
     cid: u16, // [31:16] Command Identifier
 };
+test "SQDword0 Size" {
+    const size = @sizeOf(SQDword0);
+    try expect(size == 4); // u8 + u2 + u4 + u2 + u16 = 32 bits = 4 bytes
+}
 /// Completion Queue structure
 /// TODO: SGL support
 const SQDataPointer = packed struct {
     prp1: u32, // [31:0] PRP Entry 1
     prp2: u32, // [63:32] PRP Entry 2
 };
+test "SQDataPointer Size" {
+    const size = @sizeOf(SQDataPointer);
+    try expect(size == 8); // 2 * u32 = 8 bytes
+}
 
 const CompletionQueueEntry = packed struct {
     dw0: u32, // Command Specific Dword 0
@@ -95,6 +103,16 @@ const DeviceStatus = enum {
     /// Other states not covered by the above
     Other,
 };
+
+test "DeviceStatus enum basic functionality" {
+    // Test that we can create and compare enum values
+    const status1 = DeviceStatus.Disabled;
+    const status2 = DeviceStatus.Enabled;
+    
+    try expect(status1 == DeviceStatus.Disabled);
+    try expect(status2 == DeviceStatus.Enabled);
+    try expect(status1 != status2);
+}
 /// Configuration for the NVM device
 const NvmDeviceConfig = struct {
     /// Timeout for controller reset in seconds
@@ -127,6 +145,19 @@ const NvmDeviceConfig = struct {
         };
     }
 };
+
+test "NvmDeviceConfig default values" {
+    const config = NvmDeviceConfig.default();
+    
+    try expect(config.timeout_sec == 10);
+    try expect(config.prefer_cap_to == true);
+    try expect(config.admin_queue_depth == 1);
+    try expect(config.iova_asq_base == 0x10000000);
+    try expect(config.iova_acq_base == 0x20000000);
+    try expect(config.iova_sq_base == 0x30000000);
+    try expect(config.iova_cq_base == 0x40000000);
+    try expect(config.iova_data_base == 0xa0000000);
+}
 
 /// NVMe device structure
 const NvmDevice = struct {
@@ -481,12 +512,26 @@ const ShutdownNotification = enum(u2) {
     reserved = 0b11, // Reserved
 };
 
+test "ShutdownNotification enum values" {
+    try expect(@intFromEnum(ShutdownNotification.none) == 0);
+    try expect(@intFromEnum(ShutdownNotification.normal) == 1);
+    try expect(@intFromEnum(ShutdownNotification.abrupt) == 2);
+    try expect(@intFromEnum(ShutdownNotification.reserved) == 3);
+}
+
 const ShutdownStatus = enum(u2) {
     normal = 0b00, // Normal operation
     shutdownInProgress = 0b01, // Shutdown in progress
     shutdown = 0b10, // Shutdown completed
     reserved = 0b11, // Reserved
 };
+
+test "ShutdownStatus enum values" {
+    try expect(@intFromEnum(ShutdownStatus.normal) == 0);
+    try expect(@intFromEnum(ShutdownStatus.shutdownInProgress) == 1);
+    try expect(@intFromEnum(ShutdownStatus.shutdown) == 2);
+    try expect(@intFromEnum(ShutdownStatus.reserved) == 3);
+}
 const ControllerStatus = packed struct {
     rdy: u1, // [0] Ready
     cfs: u1, // [1] Controller Fatal Status
@@ -496,12 +541,20 @@ const ControllerStatus = packed struct {
     st: u1, // [6] Shutdown Type 1 = NVM Subsystem Reset, 0 = Controller Level Resets
     _rsvd0: u25, // [31:07] Reserved
 };
+test "Controller Status Size" {
+    const size = @sizeOf(ControllerStatus);
+    try expect(size == 4); // 32 bits total = 4 bytes
+}
 const AdminQueueAttributes = packed struct {
     asqs: u12, // [11:0] Admin Submission Queue Size
     _rsvd0: u4, // [15:12] Reserved
     acqs: u12, // [27:16] Admin Completion Queue Size
     _rsvd1: u4, // [31:28] Reserved
 };
+test "Admin Queue Attributes Size" {
+    const size = @sizeOf(AdminQueueAttributes);
+    try expect(size == 4); // 32 bits total = 4 bytes
+}
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
