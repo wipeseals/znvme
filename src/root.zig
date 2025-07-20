@@ -13,7 +13,7 @@ test "basic add functionality" {
 }
 
 test {
-    _ = @import("queue.zig");
+    _ = @import("cmd.zig");
     _ = @import("util.zig");
     _ = @import("vfio.zig");
 }

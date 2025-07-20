@@ -5,7 +5,7 @@ const expect = std.testing.expect;
 const clap = @import("clap");
 
 const vfio = @import("vfio.zig");
-const queue = @import("queue.zig");
+const cmd = @import("cmd.zig");
 const util = @import("util.zig");
 
 // VFIO用Cヘッダのインクルード
@@ -65,7 +65,7 @@ const NvmDeviceConfig = struct {
             .admin_queue_depth = 1,
             .force = false,
             .buf_pool_queue_iova = 0x10000000,
-            .buf_pool_queue_size = 256 * (@sizeOf(queue.SQEntry) + @sizeOf(queue.CQEntry)),
+            .buf_pool_queue_size = 256 * (@sizeOf(cmd.SQEntry) + @sizeOf(cmd.CQEntry)),
             .iova_data_base = 0x20000000,
             .iova_data_size = 512 * 1024 * 1024,
         };
@@ -88,7 +88,7 @@ const NvmDevice = struct {
     /// DMA Buffer Pool for Data
     buf_pool_data: vfio.DmaBufPool,
     /// Admin Queue
-    admin_queue: ?queue.QPair,
+    admin_queue: ?cmd.QPair,
 
     fn timeoutSec(self: *const NvmDevice) u32 {
         if (self.config.prefer_cap_to and self.ctrl_reg.cap.to != 0) {
@@ -252,7 +252,7 @@ const NvmDevice = struct {
 
         // allocate ASQ and ACQ
         const doorbell = try self.doorbellPtr(0);
-        self.admin_queue = try queue.QPair.create(
+        self.admin_queue = try cmd.QPair.create(
             self.config.admin_queue_depth,
             self.config.admin_queue_depth,
             &doorbell,
@@ -331,7 +331,7 @@ const NvmDevice = struct {
     }
 
     /// Get the doorbell address
-    fn doorbellPtr(self: *const NvmDevice, queue_id: u32) !queue.Doorbell {
+    fn doorbellPtr(self: *const NvmDevice, queue_id: u32) !cmd.Doorbell {
         const base = 0x1000;
         const dstrd = self.ctrl_reg.cap.dstrd;
 
@@ -344,7 +344,7 @@ const NvmDevice = struct {
         // Ensure the offsets are within the bounds of BAR0
         const sq_doorbell_ptr: []align(4) u8 = @alignCast(self.vfio_container.bar0_map[sq_doorbell_offset..][0..4]);
         const cq_doorbell_ptr: []align(4) u8 = @alignCast(self.vfio_container.bar0_map[cq_doorbell_offset..][0..4]);
-        return queue.Doorbell{
+        return cmd.Doorbell{
             .sq = @ptrCast(sq_doorbell_ptr),
             .cq = @ptrCast(cq_doorbell_ptr),
         };
@@ -585,12 +585,12 @@ pub fn main() !void {
     const identify_size = 4 * 1024; // 4 KiB for Identify Command
     const identify_buf = try device.buf_pool_data.alloc(identify_size);
     defer device.buf_pool_data.free(&identify_buf) catch {};
-    const data_ptr, _ = try queue.SQDataPointer.init(identify_buf.iova, identify_size, null);
-    const identify = queue.SQEntry{
-        .cdw0 = queue.SQDword0{
-            .opc = queue.AdminOpcode.identify,
-            .fuse = queue.FusedOperation.none,
-            .psdt = queue.SQDataPointerType.prp,
+    const data_ptr, _ = try cmd.SQDataPointer.init(identify_buf.iova, identify_size, null);
+    const identify = cmd.SQEntry{
+        .cdw0 = cmd.SQDword0{
+            .opc = cmd.AdminOpcode.identify,
+            .fuse = cmd.FusedOperation.none,
+            .psdt = cmd.SQDataPointerType.prp,
             .cid = 12345, // Command Identifier
         },
         .nsid = 0x0,
@@ -598,8 +598,8 @@ pub fn main() !void {
         .cdw3 = 0, // Command Dword 3
         .mptr = 0, // Metadata Pointer (not used for Identify Command)
         .dptr = data_ptr, // Data Pointer
-        .cdw10 = queue.Cdw10Identify{
-            .cns = queue.ControllerNamespace.controller,
+        .cdw10 = cmd.Cdw10Identify{
+            .cns = cmd.ControllerNamespace.controller,
             ._rsvd = 0,
             .cntid = 0x0,
         },
