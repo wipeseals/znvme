@@ -14,17 +14,13 @@ const page_size_min = std.heap.page_size_min;
 const stdout = std.io.getStdOut().writer();
 const stderr = std.io.getStdErr().writer();
 
-pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
-
-    // コマンドライン引数を取得
+fn setupConfigFromArgs(allocator: std.mem.Allocator) !nvme.NvmDeviceConfig {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
         \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
         \\-f, --force            Force operation, skip controller register validation.
+        \\--admin_queue_depth <u32> Set the depth of the admin queue (default: 1).
         \\<str>                  PCI address BDF (e.g., 0000:00:1f.2) of the NVMe controller.
     );
     var diag = clap.Diagnostic{};
@@ -34,17 +30,17 @@ pub fn main() !void {
     };
     defer res.deinit();
 
-    if (res.args.help != 0)
-        return clap.help(stderr, clap.Help, &params, .{}); // 共通化
-
-    const verbose = res.args.verbose != 0;
-
-    const pci_addr: []const u8 = res.positionals[0] orelse {
-        try stderr.print("PCI address is required.\n", .{});
-        return clap.help(stderr, clap.Help, &params, .{}); // 共通化
-    };
+    if (res.args.help != 0) {
+        try clap.help(stderr, clap.Help, &params, .{}); // 共通化
+        return error.InvalidArgument;
+    }
 
     var config = nvme.NvmDeviceConfig.default();
+    config.pci_addr = res.positionals[0] orelse {
+        try stderr.print("PCI address is required.\n", .{});
+        try clap.help(stderr, clap.Help, &params, .{}); // 共通化
+        return error.InvalidArgument;
+    };
     if (res.args.timeout) |timeout| {
         if (timeout < 1) {
             try stderr.print("Timeout must be at least 1 second.\n", .{});
@@ -56,31 +52,60 @@ pub fn main() !void {
     if (res.args.force != 0) {
         config.force = true;
     }
-    var device = nvme.NvmDevice.open(pci_addr, &config) catch |err| {
-        try stderr.print("Failed to open NVMe device at PCI address {s}: {}\n", .{ pci_addr, err });
+    if (res.args.verbose != 0) {
+        config.verbose = true;
+    }
+    if (res.args.admin_queue_depth) |depth| {
+        // Check if the depth is within valid range
+        if (depth < 1 or depth > 4095) {
+            try stderr.print("Admin queue depth must be between 1 and 4095.\n", .{});
+            return error.InvalidArgument;
+        }
+        config.admin_queue_depth = @intCast(depth);
+    }
+    return config;
+}
+pub fn main() !void {
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // コマンドライン引数を解析
+    const config = setupConfigFromArgs(allocator) catch |err| {
+        if (err == error.InvalidArgument) {
+            // no exception, just print usage
+            return;
+        } else {
+            return err;
+        }
+    };
+
+    // コマンドライン引数を取得
+    var device = nvme.NvmDevice.open(&config) catch |err| {
+        try stderr.print("Failed to open NVMe device at PCI address {s}: {}\n", .{ config.pci_addr, err });
         if (err == error.InvalidControllerRegister) {
             // print the controller registers for debugging
-            var vfio_container = try vfio.Container.create(pci_addr);
+            var vfio_container = try vfio.Container.create(config.pci_addr);
             defer vfio_container.remove();
             try util.printHexdump(stderr, vfio_container.bar0_map, @sizeOf(nvme.ControllerRegister));
         }
         return err;
     };
     defer device.close() catch {};
-    if (verbose) {
+    if (config.verbose) {
         try stdout.print("[Initial] Current status: {}\n", .{device.status()});
     }
 
     try device.resetAndEnable();
-    if (verbose) {
+    if (config.verbose) {
         try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
     }
 
-    if (verbose) {
+    if (config.verbose) {
         const version = try device.ctrl_reg.nvmVersionStr(allocator);
         defer allocator.free(version);
         try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
-            pci_addr,
+            config.pci_addr,
             version,
             device.status(),
         });

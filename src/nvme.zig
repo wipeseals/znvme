@@ -42,10 +42,12 @@ pub const DeviceStatus = enum {
 };
 /// Configuration for the NVM device
 pub const NvmDeviceConfig = struct {
+    pci_addr: []const u8,
     timeout_sec: u32,
     prefer_cap_to: bool,
     admin_queue_depth: u12,
     force: bool,
+    verbose: bool = false,
     // VFIO Buffer Pool for Queues
     buf_pool_queue_iova: u64,
     buf_pool_queue_size: usize,
@@ -55,10 +57,12 @@ pub const NvmDeviceConfig = struct {
 
     pub fn default() NvmDeviceConfig {
         return NvmDeviceConfig{
+            .pci_addr = "0000:00:00.0",
             .timeout_sec = 30,
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
             .force = false,
+            .verbose = false,
             .buf_pool_queue_iova = 0x10000000,
             .buf_pool_queue_size = 256 * (@sizeOf(cmd.SQEntry) + @sizeOf(cmd.CQEntry)),
             .iova_data_base = 0x20000000,
@@ -98,9 +102,9 @@ pub const NvmDevice = struct {
     }
 
     /// Initialize the NVM device by mapping the controller registers from BAR0.
-    pub fn open(pci_addr: []const u8, config: *const NvmDeviceConfig) !NvmDevice {
+    pub fn open(config: *const NvmDeviceConfig) !NvmDevice {
         // Create a VFIO container for the specified PCI address
-        var vfio_container = try vfio.Container.create(pci_addr);
+        var vfio_container = try vfio.Container.create(config.pci_addr);
         errdefer vfio_container.remove();
 
         // Map the controller registers from BAR0
@@ -127,7 +131,7 @@ pub const NvmDevice = struct {
         );
         // 成功したのでリソースの所有権をムーブ
         const dev = NvmDevice{
-            .pci_addr = pci_addr,
+            .pci_addr = config.pci_addr,
             .config = config.*,
             .vfio_container = vfio_container,
             .ctrl_reg = ctrl_reg,
