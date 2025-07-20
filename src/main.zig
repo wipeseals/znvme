@@ -93,7 +93,11 @@ pub fn main() !void {
     };
 
     log.debug("[Initial] Current status: {}", .{device.status()});
-    try device.resetAndEnable();
+    device.resetAndEnable() catch |err| {
+        log.err("Failed to reset and enable NVMe device: {}\n", .{err});
+        device.printCtrlRegs(stderr) catch {};
+        return err;
+    };
     log.debug("[Post Controller Enable] Current status: {}", .{device.status()});
 
     // TEST: Create Identify Command
