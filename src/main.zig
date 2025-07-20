@@ -123,8 +123,8 @@ pub fn main() !void {
     var aq = device.admin_queue orelse {
         return error.AdminQueueNotInitialized;
     };
-    try aq.pushToSq(&identify, true);
-    const cq_entry = aq.pullFromCq(config.timeout_sec * 1000) catch |err| {
+    try aq.push(&identify, true);
+    const cq_entry = aq.pull(config.timeout_sec * 1000) catch |err| {
         device.printAdminQueue(stderr) catch {};
         return err;
     };

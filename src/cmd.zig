@@ -41,12 +41,12 @@ pub const QPair = struct {
 
     /// Push an entry to the submission queue
     /// TODO: High Throughput APIs
-    pub fn pushToSq(self: *QPair, entry: *const SQEntry, sync_doorbell: bool) !void {
+    pub fn push(self: *QPair, entry: *const SQEntry, sync_doorbell: bool) !void {
         try self.sq.pushTail(entry, sync_doorbell);
     }
 
     /// Pull an entry from the completion queue
-    pub fn pullFromCq(self: *QPair, timeout_ms: u32) !*const CQEntry {
+    pub fn pull(self: *QPair, timeout_ms: u32) !*const CQEntry {
         const entry = try self.cq.waitComplete(timeout_ms);
         try self.cq.advanceHead(1, true);
         // sync sq head
