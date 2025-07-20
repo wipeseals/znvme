@@ -1,5 +1,6 @@
 // src/main.zig
 const std = @import("std");
+const log = std.log;
 const expect = std.testing.expect;
 
 const vfio = @import("vfio.zig");
@@ -47,7 +48,6 @@ pub const NvmDeviceConfig = struct {
     prefer_cap_to: bool,
     admin_queue_depth: u12,
     force: bool,
-    verbose: bool = false,
     // VFIO Buffer Pool for Queues
     buf_pool_queue_iova: u64,
     buf_pool_queue_size: usize,
@@ -62,7 +62,6 @@ pub const NvmDeviceConfig = struct {
             .prefer_cap_to = true,
             .admin_queue_depth = 1,
             .force = false,
-            .verbose = false,
             .buf_pool_queue_iova = 0x10000000,
             .buf_pool_queue_size = 256 * (@sizeOf(cmd.SQEntry) + @sizeOf(cmd.CQEntry)),
             .iova_data_base = 0x20000000,
@@ -139,6 +138,7 @@ pub const NvmDevice = struct {
             .buf_pool_data = buf_pool_data,
             .admin_queue = null, // Initially no admin queue
         };
+
         return dev;
     }
 

@@ -1,5 +1,6 @@
 // src/main.zig
 const std = @import("std");
+const log = std.log;
 const expect = std.testing.expect;
 
 const clap = @import("clap");
@@ -17,7 +18,6 @@ const stderr = std.io.getStdErr().writer();
 fn setupConfigFromArgs(allocator: std.mem.Allocator) !nvme.NvmDeviceConfig {
     const params = comptime clap.parseParamsComptime(
         \\-h, --help             Display this help and exit.
-        \\-v, --verbose          Increase verbosity of output.
         \\-t, --timeout <u32>    Set timeout for controller reset in seconds (default: 10).
         \\-f, --force            Force operation, skip controller register validation.
         \\--admin_queue_depth <u32> Set the depth of the admin queue (default: 1).
@@ -37,13 +37,13 @@ fn setupConfigFromArgs(allocator: std.mem.Allocator) !nvme.NvmDeviceConfig {
 
     var config = nvme.NvmDeviceConfig.default();
     config.pci_addr = res.positionals[0] orelse {
-        try stderr.print("PCI address is required.\n", .{});
+        log.err("PCI address is required.\n", .{});
         try clap.help(stderr, clap.Help, &params, .{}); // 共通化
         return error.InvalidArgument;
     };
     if (res.args.timeout) |timeout| {
         if (timeout < 1) {
-            try stderr.print("Timeout must be at least 1 second.\n", .{});
+            log.err("Timeout must be at least 1 second.\n", .{});
             return error.InvalidArgument;
         }
         config.timeout_sec = timeout;
@@ -52,13 +52,10 @@ fn setupConfigFromArgs(allocator: std.mem.Allocator) !nvme.NvmDeviceConfig {
     if (res.args.force != 0) {
         config.force = true;
     }
-    if (res.args.verbose != 0) {
-        config.verbose = true;
-    }
     if (res.args.admin_queue_depth) |depth| {
         // Check if the depth is within valid range
         if (depth < 1 or depth > 4095) {
-            try stderr.print("Admin queue depth must be between 1 and 4095.\n", .{});
+            log.err("Admin queue depth must be between 1 and 4095.\n", .{});
             return error.InvalidArgument;
         }
         config.admin_queue_depth = @intCast(depth);
@@ -80,9 +77,9 @@ pub fn main() !void {
         }
     };
 
-    // コマンドライン引数を取得
+    // Open NVMe device
     var device = nvme.NvmDevice.open(&config) catch |err| {
-        try stderr.print("Failed to open NVMe device at PCI address {s}: {}\n", .{ config.pci_addr, err });
+        log.err("Failed to open NVMe device at PCI address {s}: {}\n", .{ config.pci_addr, err });
         if (err == error.InvalidControllerRegister) {
             // print the controller registers for debugging
             var vfio_container = try vfio.Container.create(config.pci_addr);
@@ -91,29 +88,13 @@ pub fn main() !void {
         }
         return err;
     };
-    defer device.close() catch {};
-    if (config.verbose) {
-        try stdout.print("[Initial] Current status: {}\n", .{device.status()});
-    }
+    defer device.close() catch |err| {
+        log.err("Failed to close NVMe device: {}\n", .{err});
+    };
 
+    log.debug("[Initial] Current status: {}", .{device.status()});
     try device.resetAndEnable();
-    if (config.verbose) {
-        try stdout.print("[Post-Reset] Current status: {}\n", .{device.status()});
-    }
-
-    if (config.verbose) {
-        const version = try device.ctrl_reg.nvmVersionStr(allocator);
-        defer allocator.free(version);
-        try stdout.print("Opened NVMe device at PCI address: {s}. NVMe Version: {s}. Status: {}\n", .{
-            config.pci_addr,
-            version,
-            device.status(),
-        });
-        try stdout.print("Controller Register Raw:", .{});
-        try device.printCtrlRegs(stdout);
-
-        try stdout.print("Parsed: {}\n", .{device.ctrl_reg});
-    }
+    log.debug("[Post Controller Enable] Current status: {}", .{device.status()});
 
     // TEST: Create Identify Command
     const identify_size = 4 * 1024; // 4 KiB for Identify Command
@@ -138,6 +119,7 @@ pub fn main() !void {
             .cntid = 0x0,
         },
     };
+    log.info("SQ Entry: {any}", .{identify});
     var aq = device.admin_queue orelse {
         return error.AdminQueueNotInitialized;
     };
@@ -146,6 +128,6 @@ pub fn main() !void {
         device.printAdminQueue(stderr) catch {};
         return err;
     };
-    try stdout.print("CQ Entry: {any}\n", .{cq_entry});
+    log.info("CQ Entry: {any}", .{cq_entry});
     try util.printHexdump(stdout, identify_buf.buf, identify_buf.buf.len);
 }

@@ -14,7 +14,7 @@
 		{
 			"type": "shell",
 			"label": "zig build run",
-			"command": "zig build run -- -v --timeout 5 ${input:pcidev}",
+			"command": "zig build run -- --timeout 5 ${input:pcidev}",
 			"group": "build",
 			"isBackground": false,
 			"problemMatcher": [

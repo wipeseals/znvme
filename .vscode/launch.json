@@ -8,7 +8,6 @@
       "program": "${workspaceFolder}/zig-out/bin/znvme",
       "args": [
         "--",
-        "-v",
         "--timeout", "5",
         "${input:pciAddress}",
       ],
