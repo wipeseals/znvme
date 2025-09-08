@@ -60,7 +60,7 @@ pub const NvmDeviceConfig = struct {
             .pci_addr = "0000:00:00.0",
             .timeout_sec = 30,
             .prefer_cap_to = true,
-            .admin_queue_depth = 1,
+            .admin_queue_depth = 32,
             .force = false,
             .buf_pool_queue_iova = 0x10000000,
             .buf_pool_queue_size = 256 * (@sizeOf(cmd.SQEntry) + @sizeOf(cmd.CQEntry)),
@@ -245,6 +245,10 @@ pub const NvmDevice = struct {
 
         // allocate ASQ and ACQ
         const doorbell = try self.doorbellPtr(0);
+        // clear Admin CQ/SQ Doorbell
+        @atomicStore(u32, doorbell.sq, 0x0, std.builtin.AtomicOrder.release);
+        @atomicStore(u32, doorbell.cq, 0x0, std.builtin.AtomicOrder.release);
+
         self.admin_queue = try cmd.QPair.create(
             self.config.admin_queue_depth,
             self.config.admin_queue_depth,
